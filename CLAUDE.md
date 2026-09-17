@@ -1,7 +1,13 @@
 # CLAUDE.md
 
-Guidance for Claude Code in this repository. The assignment is
-[agentswitch-team-brief.md](agentswitch-team-brief.md); read it before non-trivial work.
+Shared team guidance for Claude Code in this repository. The assignment is
+[agentswitch-team-brief.md](agentswitch-team-brief.md); read it before non-trivial work. The brief is
+kept out of git: each teammate places the course copy at the repo root. If it is missing, say so
+rather than guessing requirements; [docs/assignment-overview.md](docs/assignment-overview.md) is a
+summary, not the source.
+
+Personal instructions belong in `CLAUDE.local.md` (gitignored, loaded after this file). Change this
+file only for rules the whole team agrees on.
 
 ## Project
 
