@@ -98,10 +98,18 @@ The reschedule is a real write on shared data, attributed to our login (§9).
   other teams use.
 - **The agent runs on our machine, with our own model keys, driving the platform over MCP** (§8).
   "Your own harness, not a wrapper around ours."
+- **Do not use the platform's built-in Agents** (instructor's note, 2026-09-17). The app has its own
+  agents; we build ours and call the MCP tools and APIs directly. Submitted agentic pipelines will
+  replace the default agents on the app.
 - **Report platform bugs with ids** (§10): what we did, what we expected, what happened, and the
   page, agent seat and job id. File them with the in-app "Report a problem" button or
   `POST $AS/api/bug-report`; the limit is 20 per hour. Some behaviours are known and not worth
   reporting (§10).
+- **Bug reports are stored inside AgentSwitch, not on GitHub** (instructor's note, 2026-09-17). A
+  response note saying `No AGENTSWITCH_GITHUB_TOKEN configured` is expected; the report was saved.
+  List our reports with `GET $AS/api/bug-report/mine` (status and resolution note). Do not use the
+  `BugReport.list` tool for now: it currently shows other teams' reports too, a known privacy bug
+  due to be fixed in the next release.
 - **Our passwords are ours alone** (§9). Every write is attributed to whoever is signed in, so
   anyone holding our password can act as us. Do not paste logins, passwords or platform URLs
   outside the team (instructor's note); they are kept out of this public repo.
@@ -109,7 +117,9 @@ The reschedule is a real write on shared data, attributed to our login (§9).
 ## Open questions (not answered by the brief)
 
 - **How to submit.** The brief does not say whether code, run records and the gap report go to a
-  repo, a form or a demo.
+  repo, a form or a demo. The instructor's note says submitted agentic pipelines will replace the
+  default agents on the app, but not how to package or hand them over, or what interface the app
+  expects.
 - **What "read the database" means for verifiers.** We only have MCP and REST, so re-reading records
   through them is the likely meaning. Not confirmed.
 - **What "late" and "downstream" mean for this task.** Schemas show fields and links but not which

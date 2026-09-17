@@ -73,6 +73,11 @@ tests, explaining failures and proposing what a test should check (in prose) are
   every team.
 - **Every write is attributed to our login.** Treat live writes as real operations; confirm with the
   user before running a write outside an agreed task.
+- **Do not drive the platform's built-in Agents.** Our agent calls the MCP tools and APIs directly
+  (instructor's note, 2026-09-17). Submitted pipelines will replace the app's default agents.
+- **Bug reports:** list ours with `GET $AS/api/bug-report/mine`. Do not call `BugReport.list`; it
+  currently leaks other teams' reports (known, fix due next release). A `No
+  AGENTSWITCH_GITHUB_TOKEN configured` note in a bug-report response is expected, not an error.
 
 ## Harness rules (from the grading section)
 
