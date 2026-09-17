@@ -30,3 +30,6 @@ AGENTS.md
 # Private visual explainer published as a claude.ai Artifact. Kept local so Codex and Claude can
 # edit it; not committed because the page is shared privately, not through this public repo.
 /explainer/
+
+# Superseded drafts kept locally for reference, not committed.
+/archive/
