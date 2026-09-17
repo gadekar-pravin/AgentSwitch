@@ -26,8 +26,11 @@ Claude Code loads these in order ([memory docs](https://code.claude.com/docs/en/
 - All three become context; a later file is not a guaranteed override. If `CLAUDE.local.md`
   contradicts this file, follow this file and point out the conflict. Personal files should add
   preferences, not relax team rules.
-- Other AI tools do not read these files (Codex reads `AGENTS.md`). A teammate using another tool
-  must give it the team rules, especially the no-AI-tests rule.
+- **Codex reads `AGENTS.md`, not these files.** Make `AGENTS.md` a local symlink to this file:
+  `ln -s CLAUDE.md AGENTS.md` at the repo root. It is gitignored, so this file stays the only source;
+  never edit `AGENTS.md` as a separate copy. Codex has no `CLAUDE.local.md`; personal Codex
+  preferences go in `~/.codex/AGENTS.md`. For any other tool, give it this file's team rules,
+  especially the no-AI-tests rule.
 
 ## Project
 

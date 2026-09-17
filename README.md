@@ -37,6 +37,7 @@ Not in git, set up locally by each teammate:
 - `agentswitch-team-brief.md` — copy the course brief to the repo root (it is gitignored).
 - `CLAUDE.local.md` — optional personal Claude Code instructions. Claude Code loads it after the
   shared [CLAUDE.md](CLAUDE.md), which holds the team rules (including: AI must not write tests).
+- `AGENTS.md` — for Codex, a symlink to the shared rules: `ln -s CLAUDE.md AGENTS.md`.
 
 ## Platforms
 

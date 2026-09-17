@@ -24,3 +24,5 @@ __pycache__/
 
 # Personal Claude Code instructions. Team rules live in CLAUDE.md.
 CLAUDE.local.md
+# Local symlink to CLAUDE.md so Codex reads the same team rules (ln -s CLAUDE.md AGENTS.md)
+AGENTS.md
