@@ -5,8 +5,9 @@ workflow states and transitions). Findings go into [domain-notes.md](domain-note
 public: record field names and aggregate counts only, no record ids, customer names, platform URLs or
 logins.
 
-Status (2026-09-17): plan drafted, advisor-reviewed, not yet agreed by the team. Two decisions are
-open (see [Decisions needed](#decisions-needed)).
+Status (2026-09-17): plan drafted and advisor-reviewed. Step 1 done by Claude in Chrome, look-only;
+findings in [domain-notes.md](domain-notes.md#ui-walk-observed-2026-09-17). Step 3 skipped by the
+user's decision. Steps 2 and 4 not done.
 
 ## Starting point
 
@@ -103,5 +104,7 @@ Untested writes do not block finishing Step 1; they block claiming those actions
 
 ## Decisions needed
 
-1. Who does the UI walk: a teammate, or Claude in Chrome with a human signing in?
-2. Approval to run the step 3 date update on the team's draft work order.
+Both settled on 2026-09-17:
+
+1. Who does the UI walk: Claude in Chrome, with the user signed in.
+2. The step 3 date update on the team's draft work order: skipped.

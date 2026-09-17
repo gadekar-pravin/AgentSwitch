@@ -116,8 +116,12 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
 
 ## What "late" and "downstream" mean in the data
 
-- **Late (inferred):** a work order not `completed` or `cancelled` whose `planned_end_date` is
-  before today. A second signal: `draft` / `not_started` with `planned_start_date` before today.
+- **Late (observed for submitted orders; inferred for drafts):** a submitted work order
+  (`not_started`, `in_progress`, `stopped`) whose `planned_end_date` is before today. The UI's own
+  "Late production orders" list uses this rule: its "Due" date is `planned_end_date`, and it counts
+  51 on Suryodaya and 7 on Keystone, matching `finite_schedule` (see [UI walk](#ui-walk-observed-2026-09-17)).
+  Drafts past planned end are not counted by the UI. A second signal we may use: `draft` /
+  `not_started` with `planned_start_date` before today.
   On 2026-09-17: Suryodaya 57 of 123 are past planned end (draft 6, not_started 34,
   in_progress 13, stopped 4); Keystone 7 of 28. No completed work order finished after its
   planned end on either tenant, so history gives no examples of "late but done".
@@ -229,6 +233,87 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
   reservation would be invisible. Safe for the agent to call; do not rely on it being idempotent.
 - **Use for the agent (inferred):** the one direct material-shortage signal for "why is it late".
 
+## UI walk (observed, 2026-09-17)
+
+Walked in Chrome with the team04 login, look-only: no action button, form or Save was pressed. Plan:
+[domain-learning-plan.md](domain-learning-plan.md) step 1. Suryodaya in full, Keystone briefly. No
+screenshots kept.
+
+### Where "late" shows
+
+- **Company overview (both tenants):** a Manufacturing card with orders in progress (Suryodaya 19,
+  Keystone 9), "Overdue production orders" (51 / 7) and "Orders not started" (38 / 11). A "Late
+  production orders" list shows each order's "Due" date (= `planned_end_date`) and status.
+- **All Work Orders:** status tiles. Suryodaya 123 total: draft 16, not started 38, in progress 19,
+  completed 46, stopped 4. Keystone 28 total: draft 0, not started 11, in progress 9, completed 6,
+  stopped 2. The per-status lists show different default columns (e.g. Pending Start shows planned
+  start date, In Progress shows actual start date, Stopped shows notes); none shows planned end date
+  or a late badge.
+- **Finite schedule view** (All Work Orders → "Finite schedule"): the same data as the
+  `finite_schedule` endpoint, with a per-order explanation (e.g. "The work itself does not fit… the
+  order's own date leaves -91 day(s)") and a stated basis: 21-day horizon from today, declared
+  workstation hours, recorded downtime and changeover setup charged, no work calendar, labour not a
+  constraint, first operation on each machine never charged setup.
+- **Manufacturing dashboard** page failed to load ("Unable to load the manufacturing dashboard"), also
+  after Retry.
+
+### Work order record
+
+- **Header:** number and item, status, a coloured dot (appears to be priority), production
+  strategy, BOM with revision, planned start → end dates, qty, produced, expected and actual cost.
+- **Buttons per state; no Edit control in any state, including the team's own draft:**
+
+  | State | Buttons |
+  | --- | --- |
+  | `draft` | Submit, Cancel |
+  | `not_started` | Start Production, Cancel |
+  | `in_progress` | Complete, Stop, Cancel |
+  | `stopped` | Resume, Cancel |
+
+  Cancel is offered in every state although it needs `admin`. Dates cannot be changed in the UI; this
+  does not show whether `WorkOrder.update` accepts dates on a draft (still untested).
+- **Overview cards:** BOM cost, cost variance, production progress, WIP accounting, sales order (shown
+  as a raw id), operation time (planned, actual, job cards done).
+- **Tabs:** Job Cards, Materials (BOM materials with lead time and critical flag; items shown as raw
+  ids; no stock or shortage), Operations (sequence, workstation, planned and actual minutes, cost),
+  3D View, Quality (inspections, with a New Inspection button), Traceability (batches and serial
+  numbers).
+- **Not shown on a work order:** stop reason, comments or history, linked material requests or
+  subcontract orders, `approval_status`, project.
+- A banner on every record: "Some related sections are unavailable in your permission scope: JobCard."
+
+### Exception Cockpit (Suryodaya)
+
+"Review named material shortages, automation failures, subcontract follow-up, and quality concerns."
+
+| Section | What our seat sees |
+| --- | --- |
+| Material shortages | "Evidence is not available for this role" |
+| Quality review | 28 inspections: 6 completed with result rejected, 22 draft |
+| Subcontract follow-up | 4 submitted orders with delivery overdue |
+| Automation failures | "Evidence is not available for this role" |
+
+### Settings (General = ManufacturingPreferences)
+
+- **Suryodaya:** auto create job cards on, auto consume materials off, allow over-production off
+  (tolerance 10), backflush materials off, require quality inspection on, auto close work order on
+  completion on, costing method standard. Enforcement of these settings is untested.
+- **Keystone:** no settings record (empty form).
+- The page is an editable form with Save; our seat can write it. Do not change it.
+
+### Where the UI misleads
+
+- **Refusals shown as empty lists:** the Downtime Log says "No records found" and a work order's Job
+  Cards tab says "No job cards for this work order", while the API refuses both entities.
+- **Hidden actuals:** an in-progress Suryodaya order shows 800 actual operation minutes with "0 / 0"
+  job cards done; the minutes come from job cards we cannot read.
+- **Sales order link:** opening it gives "You do not have access to this list. App 'accounting' is not
+  enabled for your account", although `SalesOrder.get` works over MCP on Suryodaya. Different door,
+  different answer; not a bug under the seat-boundary rule.
+- **Page-scoped KPI:** the Subcontracting list's "Overdue 25" tile says "of 25 shown", i.e. the current
+  page only, not the 100 orders.
+- **Currency:** Keystone (a US business) shows costs in ₹.
+
 ## Seat boundaries hit
 
 - Refused although listed: `JobCard.*`, `DowntimeEntry.*`, `EngineeringChangeOrder.*` (both
@@ -241,9 +326,9 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
 
 ## Next checks
 
-- Look at a few late work orders in the UI to confirm which date the business treats as "late".
 - Agree as a team before any write test, e.g. `WorkOrder.update` on dates for a `draft`,
-  `in_progress` or `stopped` work order the team created.
+  `in_progress` or `stopped` work order the team created. The draft date test in
+  [domain-learning-plan.md](domain-learning-plan.md) step 3 was skipped on 2026-09-17.
 - Check `GET /api/bug-report/mine` and the [live bug tracker](https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h)
   for resolution notes before building around a refusal.
 
