@@ -267,6 +267,11 @@ Starting hypotheses from the domain notes (inferred, to be confirmed against the
   and stopped are untested, so do not call this a gap until tested.
 - **Stock history, purchasing, SalesOrder on Keystone:** seat limit; escalate.
 
+Release 1 (2026-09-17) changed three of these hypotheses: JobCard, DowntimeEntry and
+EngineeringChangeOrder now read; SalesOrder reads on Keystone; the seat has no cancel tools. See the
+[Release 1 changes](domain-notes.md#release-1-changes-observed-2026-09-17). The gap report uses the
+updated facts.
+
 ## Q3 guardrails
 
 - Claim only what we can show: the agent holds the whole request across many steps, re-reads records

@@ -2,12 +2,16 @@
 
 **AgentSwitch can investigate late work, but Carbon has the stronger scheduling engine.**
 
+Updated for AgentSwitch Release 1 (2026-09-17), which fixed the access bugs this report first
+described. Evidence: [domain notes](domain-notes.md#release-1-changes-observed-2026-09-17).
+
 ## Executive summary
 
 - **Carbon is stronger at scheduling.** It models finite machine and operator capacity, explains why
   operations are delayed, supports non-persistent what-if analysis, and replans after inputs change.
-  In the 2026-09-17 AgentSwitch snapshot, 50 of 51 late Suryodaya orders received the same generic
-  `work_content_exceeds_due_date` code.
+  AgentSwitch's `finite_schedule` still projects every open order to finish on the same day. Before
+  Release 1, 50 of 51 late Suryodaya orders got the generic `work_content_exceeds_due_date` code; after
+  it, 46 cite `recorded_downtime` and 5 `due_date_passed`, but none names a blocking job.
 - **The AgentSwitch agent can still improve the current workflow.** It can join records that a user
   would otherwise inspect separately, identify candidate causes, trace supported customer exposure,
   make an allowed change, and verify the result.
@@ -34,8 +38,8 @@ it; *untested* means we have not safely exercised that behavior.
 
 | Capability | Carbon | AgentSwitch today | Gap assessment |
 | --- | --- | --- | --- |
-| **Capacity-aware scheduling** | Places operations forward within work-centre hours; subtracts maintenance downtime; reserves qualified operators when required | `finite_schedule` projected every submitted open order to finish on the current day. Its capacity basis says work calendars and labour are not modelled. Downtime appeared not to reduce the projection (*inferred*). | **Platform defect and model gap** |
-| **Specific delay explanations** | Stores operation-level notes and conflict reasons, such as waiting behind named jobs, waiting for a work centre, or lacking a qualified operator | In the 2026-09-17 Suryodaya snapshot, 50 of 51 late orders received `work_content_exceeds_due_date`, largely restating that the due date had passed. Blocking and downtime cause arrays were empty. | **Agent partly; platform output gap plus filed access bugs** |
+| **Capacity-aware scheduling** | Places operations forward within work-centre hours; subtracts maintenance downtime; reserves qualified operators when required | `finite_schedule` projected every submitted open order to finish on the current day. Its capacity basis says work calendars and labour are not modelled. Downtime appeared not to reduce the projection (*inferred*). Unchanged after Release 1: every order still has the same projected finish. | **Platform defect and model gap** |
+| **Specific delay explanations** | Stores operation-level notes and conflict reasons, such as waiting behind named jobs, waiting for a work centre, or lacking a qualified operator | Before Release 1, 50 of 51 late Suryodaya orders received `work_content_exceeds_due_date`, largely restating that the due date had passed, and the cause arrays were empty. After it, 46 cite `recorded_downtime` with the downtime attached and 5 `due_date_passed`; `blocking` is still always empty. | **Agent partly; platform output gap** |
 | **Expedite what-if** | Public source exposes a non-persistent forecast of projected completion | No equivalent simulation tool was found in the inspected MCP surface. | **Platform capability missing** |
 | **Replanning** | Input changes can trigger a whole-location replan; Carbon reports jobs made newly late | No working capacity-based replan was found. | **Platform capability missing** |
 | **Shared-material allocation** | Calculates shortfall across active jobs in priority order | `check_stock_availability` evaluates one work order at a time. `StockEntry` and `StockLedger` are outside the Production seat, so repeating the available call cannot establish which job should receive shared stock. | **Agent partly; seat limit plus scoped-service gap** |
@@ -43,10 +47,10 @@ it; *untested* means we have not safely exercised that behavior.
 
 ### Important qualification: access bugs are not feature gaps
 
-`JobCard`, `DowntimeEntry`, and `EngineeringChangeOrder` could provide progress, downtime, and
-engineering-hold evidence. Their tools were listed for the Production seat but refused access, and
-bug reports were filed. The underlying entities exist, so the report treats this as an **access bug**,
-not as proof that AgentSwitch lacks those features.
+`JobCard`, `DowntimeEntry`, and `EngineeringChangeOrder` provide progress, downtime, and
+engineering-hold evidence. Before Release 1 their tools were listed for the Production seat but
+refused access, and bug reports were filed. Release 1 fixed this: all three now read on both
+tenants (*observed*). That was an **access bug**, not a missing AgentSwitch feature.
 
 Carbon also has a limitation: our source review found no proven cross-job supply pegging. It can show
 predecessor delays within a job and knock-on lateness after a replan, but that does not prove that one
@@ -58,10 +62,10 @@ production job supplies a particular consuming job.
 
 | Task | What the agent can do now | Evidence boundary |
 | --- | --- | --- |
-| **Investigate why an order is late** | Join `WorkOrder`, linked `MaterialRequest` and `SubcontractOrder` records, `QualityInspection`, and `check_stock_availability` | These produce **candidate explanations**, not proven causes, while job progress, downtime, and engineering-change evidence remains unreadable. |
-| **Trace customer exposure** | Follow an allowed `WorkOrder.sales_order_id` with `SalesOrder.get` | Available on Suryodaya. Keystone lacks `SalesOrder.*` because the seat has no `viewer` role, so the agent must escalate. A linked order shows exposure, not necessarily that the late work order is the sole cause. |
+| **Investigate why an order is late** | Join `WorkOrder`, linked `MaterialRequest` and `SubcontractOrder` records, `QualityInspection`, and `check_stock_availability` | Since Release 1 the agent can add `JobCard` progress, `DowntimeEntry` reasons, and `EngineeringChangeOrder` affected orders. These still produce **candidate explanations**, not proven causes: many downtime entries have no `work_order_id`, and whether an open ECO holds an order is untested. |
+| **Trace customer exposure** | Follow an allowed `WorkOrder.sales_order_id` with `SalesOrder.get` | Available on both tenants since Release 1 (Keystone lacked `SalesOrder.*` before). A linked order shows exposure, not necessarily that the late work order is the sole cause. |
 | **Find potentially affected production orders** | Match the late order's output item against materials in other BOMs | This identifies **potential consumers only**. Stock or another work order may satisfy the demand. |
-| **Make a permitted date change** | Re-read the target, attempt only a state-valid update, then re-read and report the observed result | A reported `WorkOrder.update` call was refused for `not_started`; cancellation requires `admin`; date updates for `draft`, `in_progress`, and `stopped` remain untested. |
+| **Make a permitted date change** | Re-read the target, attempt only a state-valid update, then re-read and report the observed result | A reported `WorkOrder.update` call was refused for `not_started` (not re-checked after Release 1); the seat has no cancel tools; date updates for `draft`, `in_progress`, and `stopped` remain untested. |
 | **Escalate blocked work** | Call `endpoint.agent_governance.escalations.raise` with the records checked, the missing evidence, and the requested action | Without a reliable capacity forecast, the agent must not invent a feasible replacement date. |
 
 ### These gaps require platform work or escalation
@@ -73,7 +77,6 @@ production job supplies a particular consuming job.
 | Dependable replanning | Re-reading records cannot reproduce a scheduling engine or attribute every concurrent change to our action. | **Platform capability missing** |
 | Cross-job dependency or pegging | BOM matching shows possible demand, not a confirmed supply relationship between two work orders. | **Platform link missing** |
 | Shared-material allocation | The Production seat cannot read `StockEntry` or `StockLedger`. It needs a human/EA escalation or a new Production-scoped aggregation service. | **Seat limit plus scoped-service gap** |
-| Access to progress, downtime, and ECO evidence | The existing manufacturing entity tools must be fixed or correctly authorized; prompting cannot bypass permission enforcement. | **Filed access bugs** |
 
 ## 3. What can our agent do that Carbon cannot?
 

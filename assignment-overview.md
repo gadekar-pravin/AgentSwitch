@@ -84,7 +84,8 @@ Rescheduling is a real write to shared data and is attributed to our login.
 - Re-read records before writes. Do not delete, bulk-edit, or tidy unrelated data (§3).
 - Never call `PUT /api/accounting/locale`; it changes a shared company's accounting regime.
 - Build and run our own agent locally with our model keys. Do not drive AgentSwitch's built-in
-  Agents (instructor note, 2026-09-17).
+  Agents (instructor note, 2026-09-17). Once our harness is ready, the instructor plans to integrate
+  it with the platform's own LLM (Release 1 note, 2026-09-17).
 - Keep credentials in `.env`. Never write passwords or tokens to logs, run records, documentation,
   or commits (§9).
 
@@ -93,9 +94,28 @@ Rescheduling is a real write to shared data and is attributed to our login.
 Report reproducible platform bugs with the action, expected result, actual result, page, seat, and
 job ID. Use the in-app button or `POST $AS/api/bug-report`; the limit is 20 reports per hour (§10).
 
-Use `GET $AS/api/bug-report/mine` to view our reports. Do not use `BugReport.list`; it currently
-exposes other teams' reports. A response saying `No AGENTSWITCH_GITHUB_TOKEN configured` is expected
-and does not mean the report failed (instructor note, 2026-09-17).
+Use `GET $AS/api/bug-report/mine` to view our reports. Do not use `BugReport.list`; it exposed
+other teams' reports before Release 1, and we have not confirmed a fix. A response saying
+`No AGENTSWITCH_GITHUB_TOKEN configured` is expected and does not mean the report failed (instructor
+note, 2026-09-17).
+
+Fixes and the release that contains each are shown on the Bug Board. Reports filed after 14:35 on
+2026-09-17 go into the next release. After Release 1, `/mine` still showed every report as `new`
+with no resolution note, so use the Bug Board for fix status.
+
+## Release 1 (instructor note, 2026-09-17)
+
+- Every bug reported before 14:35 on 2026-09-17 is fixed on both instances. What this changed for
+  our seat is recorded in [docs/domain-notes.md](docs/domain-notes.md#release-1-changes-observed-2026-09-17).
+- The in-app agent is on for the team login (Agent or Ask Agent → New chat). It acts as our login and
+  sees only what we can see. Sending invoices or emails, payments and deletions wait for approval.
+  Our own MCP agents keep working with the team token. Scheduled agent tasks for our seat now run,
+  so they may also change records under our login.
+- Limits: 1M tokens a day per agent and 10M a day for the whole workspace, reset the next day.
+- Known issues: open a New chat (an older chat can say "Your agent can't run for this login yet");
+  Suryodaya emails stored before 2026-09-17 cannot be opened; some demo names are odd (e.g.
+  "Bench Vice 8873"); some sample recurring bills do not generate. The last two are fixed in the next
+  release. Do not file these as new bugs.
 
 Do not report documented behavior such as cross-app `403` responses, seat-scoped missing tools, or
 other teams changing shared data.

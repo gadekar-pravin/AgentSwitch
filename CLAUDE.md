@@ -40,7 +40,9 @@ late. Find out why, tell me what it blocks downstream, and reschedule what you c
 
 Current stage: scaffold only. No agent, MCP client or harness code exists yet. The brief's order
 is domain learning → competitor study → gap report ([docs/gap-report.md](docs/gap-report.md)) →
-agent → harness. The LLM provider is not chosen yet; do not wire one without asking.
+agent → harness. The LLM provider is not chosen yet; do not wire one without asking. The instructor
+says the platform's own LLM will be integrated with our pipeline once the harness is ready
+(Release 1 note, 2026-09-17).
 
 ## Commands
 
@@ -78,9 +80,15 @@ tests, explaining failures and proposing what a test should check (in prose) are
   user before running a write outside an agreed task.
 - **Do not drive the platform's built-in Agents.** Our agent calls the MCP tools and APIs directly
   (instructor's note, 2026-09-17). Submitted pipelines will replace the app's default agents.
+- **The in-app agent is live on our login (Release 1, 2026-09-17).** A teammate may chat with it in
+  the UI (Agent → New chat; reopening an old chat can fail) to compare answers. It acts as our login,
+  so its writes are ours: apply the same write rules. Never call it from our agent or harness. Each
+  agent has 1M tokens a day and the workspace shares 10M; do not spend them on idle chats.
 - **Bug reports:** list ours with `GET $AS/api/bug-report/mine`. Do not call `BugReport.list`; it
-  currently leaks other teams' reports (known, fix due next release). A `No
+  leaked other teams' reports before Release 1, and we have not confirmed a fix. A `No
   AGENTSWITCH_GITHUB_TOKEN configured` note in a bug-report response is expected, not an error.
+  Fix status is on the Bug Board, not in `/mine` (still `new` after Release 1). Reports filed after
+  14:35 on 2026-09-17 go into the next release.
 
 ## Harness rules (from the grading section)
 
