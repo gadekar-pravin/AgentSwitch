@@ -11,7 +11,8 @@ docs, changelog or source code; **claimed** = marketing page, blog, pricing, FAQ
 Status (2026-09-17): the plan is agreed and nothing has been studied hands-on yet. The screen below
 combines our web screen, a second screen by another AI search agent, and our own check of the load-bearing
 claims on the vendors' pages and Carbon's source. The Carbon agent surface has been studied from source
-([below](#carbon-agent-surface-from-source)); nothing was run.
+([below](#carbon-agent-surface-from-source)) and Fulcrum's from its public docs and REST spec
+([below](#fulcrum-agent-surface-from-docs)); nothing was run.
 
 ## Picks
 
@@ -128,6 +129,68 @@ the tool classification and permission from `tool-manifest.digest.json`. Everyth
 - Does the Starter trial run the Enterprise scheduler (Forecast page, amber flags, expedite dialog)?
 - After a job due-date change in the UI, how long until the placement and conflict flags update?
 - What does the expedite dialog show for a job blocked by a material shortage but not by capacity?
+
+## Fulcrum agent surface (from docs)
+
+Read on 2026-09-17 from the public developer hub: [MCP introduction](https://developers.fulcrumpro.com/mcp),
+[getting started](https://developers.fulcrumpro.com/mcp/getting-started),
+[MCP tools](https://developers.fulcrumpro.com/mcp/capabilities),
+[permissions and safety](https://developers.fulcrumpro.com/mcp/permissions-and-safety), and the REST
+spec (`https://api.fulcrumpro.com/swagger/v1/swagger.json`, "Fulcrum PublicAPI v1", 376 paths). Also
+product pages and changelog entries named below. Nothing was run.
+
+Fulcrum publishes MCP **capability groups, not tool names or schemas** ("actively evolving"). The table
+therefore names capabilities, not calls.
+
+### Our request as Fulcrum capabilities
+
+| Step | MCP capability (write actions in bold) | What the docs show |
+| --- | --- | --- |
+| Find the late job | Jobs: search, view details, "surface at-risk jobs"; Dashboards: "schedule health" | The REST job record carries `productionDueDate`, `earliestStartDate`, `scheduledStartUtc` / `scheduledEndUtc` and the first scheduled `originalScheduledStartUtc` / `originalScheduledEndUtc`, so slip against the first schedule is readable (documented). How "at risk" is computed is not documented. |
+| Why is it late | Equipment: "view schedules, check backlogs"; Scheduling & Capacity: "check capacity utilization, identify bottlenecks"; Work Orders: "view operations"; Items & Inventory: on-hand; Purchase Orders: "receiving status" | No per-job cause or explanation found. An agent assembles the cause from bottlenecks, equipment backlog, operation progress and material. AutoSchedule is said to factor shifts, equipment, operations and "material availability" ([production scheduling](https://fulcrumpro.com/manufacturing-software/production-scheduling), claimed). REST `/api/inventory/availableByItem` returns on hand plus incoming supply minus demand (documented). |
+| What it blocks downstream | Sales Orders: "view fulfillment progress and linked jobs"; Dashboards: "demand planning" | A job links to `salesOrderId` and `salesOrderLineItemId` (REST, documented). Demand planning has a "Timing Issue" KPI for "an item isn't expected to be ready on time for something that depends on it", and flags "jobs that won't be done in time for the orders that rely on them" ([demand planning](https://fulcrumpro.com/manufacturing-software/demand-planning), claimed). What-if scenarios "see how downstream operations/jobs are impacted" (production scheduling page, claimed). |
+| Reschedule | Jobs: **change statuses, update priorities and due dates**; Scheduling & Capacity: **trigger scheduling runs** | Writable job fields over REST are `name`, `priority` (low / moderate / high), `quantityToMake`, `productionDueDate`, `earliestStartDate`, `notes` (documented). AutoSchedule re-sequences on the next run; operations scheduled in the past move to the present, and running operations get priority on their equipment. Drag-and-drop locks an operation to a date and switches that behaviour off ([changelog, 2023-11-27](https://fulcrumpro.com/product-update/autoschedule-enhancement-to-improve-scheduling-accuracy-and-priority-visibility-in-job-tracker), documented). |
+| Re-read | Jobs: view details; Dashboards: schedule health | `scheduledEndUtc` after a scheduling run, compared with `productionDueDate`. |
+
+### Findings
+
+- **The scheduler is MCP-only.** The public REST spec has no scheduling, capacity or dashboard
+  endpoint (0 of 376 paths). Running the scheduler, bottlenecks and schedule health exist only in the
+  MCP capabilities (documented by absence).
+- **Guardrails are the user's permissions plus previews.** "You can only view or modify data that your
+  Fulcrum user account has access to", and "all status changes that could have side effects are
+  previewed before executing", with blockers and consequences shown before confirming (documented).
+  Connecting needs a "Connect OAuth" or "Create MCP API Key" permission. Audit logging, rate limits and
+  whether a scheduling run is previewed are not documented.
+- **Due dates are an input to AutoSchedule, not a pin.** Changing `productionDueDate` or priority takes
+  effect on the next scheduling run, which the agent must trigger (inferred from the capability list and
+  the 2023 changelog). Whether a run covers the whole shop or one job is not documented.
+- **Downstream tracing is stronger than Carbon's on paper.** Demand planning claims supply-to-demand
+  timing issues across dependent items and orders; Carbon has only inside-job sub-assembly delays and
+  "newly late" lists. Fulcrum's claim is marketing-level; no API or MCP detail backs it.
+- **Built-in agents are not shipped.** The product page lists Archie agents as "Coming soon"
+  (claimed). The MCP server is the agent surface today; it is available to all customers, per the
+  [MCP release](https://fulcrumpro.com/product-update/fulcrum-mcp-server-connect-ai-tools-directly-to-your-shop-data)
+  (documented).
+- **Not the same product:** `help.fulcrumapp.com` is Fulcrum field-inspection software, not Fulcrum Pro.
+  Do not cite it.
+
+### Carbon and Fulcrum side by side (for the gap report)
+
+| Step | Carbon (source, documented) | Fulcrum (docs; mostly claimed below the capability level) |
+| --- | --- | --- |
+| Why late | Per-operation cause naming blocking jobs or the late predecessor; expedite what-if | Bottlenecks, backlog, schedule health; no per-job cause found |
+| Material in the schedule | Not a scheduling constraint; separate shortfall tool | Listed as an AutoSchedule input (claimed) |
+| Downstream | Sub-assembly delay inside a job; newly-late jobs after replan; sales order link | Sales order linked jobs; demand-planning timing issues across dependents (claimed) |
+| Reschedule | Due date, priority, work centre, then an explicit replan call (location-wide) | Priority, due date, earliest start, then trigger a scheduling run |
+| Agent guardrails | Per-tool permission metadata; some tools re-check; blocked-tool list | User permissions; previews for side-effect status changes |
+| Inspectable detail | Every tool name, classification and permission, plus source | Capability groups only; REST spec for data fields |
+
+### Open questions (demo only)
+
+- How is "at risk" defined, and does the schedule-health dashboard name a cause per job?
+- Does a triggered scheduling run cover the whole shop, and is it previewed?
+- Does the Timing Issue KPI peg a specific sub-assembly job to the order that consumes it?
 
 ## Method (about one team-day)
 
