@@ -67,7 +67,7 @@ Tools relevant to "late work order":
 | Read | `WorkOrder.list/.get`, `BOM.*`, `Routing.*`, `Operation.*`, `Workstation.*`, `MaterialRequest.*`, `SubcontractOrder.*`, `ProductionPlan.*`, `QualityInspection.*`, `Batch.*`, `SerialNumber.*`, `Item.*`, `SalesOrder.list/.get` (Suryodaya only) |
 | Listed but refused (see below) | `JobCard.*`, `DowntimeEntry.*`, `EngineeringChangeOrder.*` |
 | Reschedule / state change | `WorkOrder.update` (planned dates, priority), `WorkOrder.submit`, `.start_production`, `.stop`, `.resume`, `.complete`; five `WorkOrder.cancel.<from>.cancelled` |
-| App endpoints | `endpoint.manufacturing.finite_schedule` (GET, arg `horizon_days`; called by the team, see below), `.genealogy` (GET, arg `code`), `.check_stock_availability` (POST, args `work_order_id`, `bom_id`, `qty`; needs only `WorkOrder.read` but is not marked read-only), `.generate_production_plan`, `.create_work_orders_from_plan`, `.create_material_requests`, `.work_instructions.acknowledge` (all untested except `finite_schedule`) |
+| App endpoints | `endpoint.manufacturing.finite_schedule` (GET, arg `horizon_days`), `.genealogy` (GET, arg `code`) — both called, see [App endpoints](#app-endpoints-observed-2026-09-17); `.check_stock_availability` (POST, args `work_order_id`, `bom_id`, `qty`; needs only `WorkOrder.read` but is not marked read-only), `.generate_production_plan`, `.create_work_orders_from_plan`, `.create_material_requests`, `.work_instructions.acknowledge` (the rest untested) |
 | Escalation | `endpoint.agent_governance.escalations.raise` / `.assignees` / `.update`, `AgentEscalation.*` |
 
 ### Listed tools that refuse (observed, both tenants)
@@ -139,20 +139,75 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
     it makes an item that appears in the other's BOM `materials`. On Suryodaya, 62 open work orders
     make an item that is a material in some BOM. `BOM.parent_bom_id` is never set.
   - `ProductionPlan.items[].sales_order_id` (plans are not linked from work orders today).
-  - Batches and serial numbers link back to `work_order_id`; `genealogy` may trace this
-    (untested).
-- **`finite_schedule` (reported, 2026-09-16):** with `horizon_days: 14` it lists late orders with
-  `causes[]`. On Suryodaya all 49 late orders had cause `work_content_exceeds_due_date` (one also
-  `changeover_setup`); `causes[].downtime` and `causes[].blocking` were never populated. It also
-  returns job-card ids, labels and workstations that `JobCard.get` reports as `Not found`. Useful as
-  a hint, not as proof of the cause.
+  - Batches and serial numbers link back to `work_order_id`. `genealogy` finds a batch's
+    producing work order but cannot follow consumption downstream (see below).
 - **Reschedulable (mostly blocked; partly reported):** `WorkOrder.update` on a `not_started` work
   order is refused: "Cannot modify WorkOrder in 'not_started' status… Cancel first to make changes"
   (reported, 2026-09-16). Cancel needs `admin`, so our seat cannot follow that advice. Unknown:
-  whether `draft`, `in_progress` or `stopped` work orders accept date updates, whether
-  `finite_schedule` proposes dates, and what capacity rule a new date must respect. If most orders
+  whether `draft`, `in_progress` or `stopped` work orders accept date updates, and what capacity
+  rule a new date must respect. `finite_schedule` does not propose new dates: it projects every
+  open order to finish today (see below). If most orders
   cannot be re-dated, "reschedule what you can" may mostly mean: re-date drafts, `stop` / `resume`,
   and escalate the rest with a proposed date (inferred).
+
+## App endpoints (observed, 2026-09-17)
+
+Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
+`/dumps/<tenant>-finite_schedule*.json` and `/dumps/<tenant>-genealogy-*.json`. Both return
+`structuredContent = {status: "ok", result: {...}}`. The input schemas give no type for
+`horizon_days` or `code`.
+
+### `finite_schedule`
+
+- **Output:** `counts` (`late`, `on_time`, `unknown`, `no_due_date`), `orders[]`,
+  `workstation_load[]`, `capacity_basis`, `schedule_state` (`ready`), `complete` (true).
+- **Each order:** `work_order_id`, `status_code`, `due_date`, `projected_finish`, `days_late`,
+  `verdict` (`late` / `on_time` / `unknown`), `verdict_code` (the main cause), `causes[]` and
+  `operations[]` (one per job card: `job_card_id`, `operation_name`, `workstation_id`,
+  `scheduled_start`, `scheduled_finish`, `minutes`, `setup_minutes`, `state`). `handoff` names the
+  WorkOrder and `can_edit` (true for our seat).
+- **`horizon_days` changes only the echoed `horizon_days` / `horizon_end`** (default 21). The
+  orders, verdicts and counts were identical for no argument, 14 and 90.
+- **Scope:** open work orders that are submitted (`not_started`, `in_progress`, `stopped`).
+  `draft` and `completed` are left out.
+- **`due_date` is `planned_end_date`** for every order (61 / 61 Suryodaya, 22 / 22 Keystone).
+- **Every order is projected to finish today**, and every operation is scheduled today. So
+  `late` here means `planned_end_date` before today, the same as our own rule for submitted orders:
+  Suryodaya 51 late, 10 on time (our rule also counts 6 late drafts, giving 57); Keystone 7 late,
+  14 on time, 1 `unknown` (`workstation_unassigned`). A teammate saw 49 late on Suryodaya the day
+  before, so the set moves.
+- **Causes are thin:** `verdict_code` is `work_content_exceeds_due_date` for 50 of 51 late
+  Suryodaya orders and `changeover_setup` for 1; all 7 on Keystone are
+  `work_content_exceeds_due_date`. Most of those have negative `days_available` (the due date has
+  passed), so the code restates "due date passed" rather than naming why. `causes[].downtime` and
+  `causes[].blocking` are always empty (already reported).
+- **Workstation load shows downtime we cannot read directly:** every workstation has
+  `downtime_minutes` > 0 (up to about 2,400 on Suryodaya against 480 declared minutes a day), yet the
+  workstations stay `ready` and the orders still finish today. Downtime does not seem to reduce
+  capacity in the projection (inferred). 5 Suryodaya workstations are `unavailable`
+  (decommissioned, under maintenance, or `is_active: false`).
+- **`capacity_basis`:** work calendar, labour capacity and initial setup are not modelled.
+  Changeovers are modelled on Suryodaya (83 setup-matrix rules; 1 of 85 item changes costed), not on
+  Keystone (0 rules).
+- **Job-card data leaks through:** all 149 Suryodaya and 93 Keystone operations carry a
+  `job_card_id` and label, although `JobCard.list/.get` refuse (already reported).
+- **Use for the agent (inferred):** a quick list of late submitted orders with their operations
+  and workstations. It is not evidence of cause and gives no new dates. Verify against
+  `WorkOrder.get` before acting.
+
+### `genealogy`
+
+- **Input:** `code` is a lot code. A `Batch.batch_number` resolves (`resolution: resolved`); a
+  WorkOrder number returns `resolution: code_not_found`. No argument: `-32602 Invalid request.`
+- **Output:** `subject` (the Batch, with `work_order_id`), `upstream[]`, `downstream[]`,
+  `recipients[]`, `unproven[]`, `counts`, `max_depth` (4), `depth_truncated`, and `lane_states`.
+- **`lane_states`:** `WorkOrder`, `JobCard`, `Party` are `ready`; `StockEntry` and `StockLedger` are
+  `permission_denied`.
+- **Result on one batch per tenant:** `upstream` = the producing WorkOrder. `downstream` and
+  `recipients` are empty, with 2 `unproven` hops (`documents_denied`, `ledger_denied`). Without stock
+  access, genealogy cannot show which later orders or customers consumed a lot.
+- **Use for the agent (inferred):** batch → producing work order only. Not a downstream tracer for
+  our seat.
 
 ## Seat boundaries hit
 
@@ -161,13 +216,15 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
 - Absent on Keystone: `SalesOrder.*` (no `viewer` role). Tracing a work order to its sales order on
   Keystone needs an escalation.
 - Absent on both: stock, warehouse, purchasing and employee entities. Material availability beyond
-  `check_stock_availability` needs an escalation.
+  `check_stock_availability` needs an escalation. `genealogy` reports `StockEntry` and
+  `StockLedger` as `permission_denied`.
 
 ## Next checks
 
 - Look at a few late work orders in the UI to confirm which date the business treats as "late".
-- Call the untested read endpoints (`finite_schedule`, `genealogy`) and decide whether
-  `check_stock_availability` is safe to call (it is POST and not marked read-only).
+- Decide whether `check_stock_availability` is safe to call (POST, not marked read-only).
+- Decide whether downtime and job-card data visible through `finite_schedule` but refused by the
+  entity tools is worth adding to the row-scope reports.
 - Agree as a team before any write test, e.g. `WorkOrder.update` on dates for a `draft`,
   `in_progress` or `stopped` work order the team created.
 - Check `GET /api/bug-report/mine` for resolution notes before building around a refusal.
