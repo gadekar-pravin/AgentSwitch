@@ -4,24 +4,27 @@ The study plan and its evidence log. It feeds the one-page [gap report](gap-repo
 of the brief). This repo is public, so competitor names and public competitor links are fine here.
 Do not add AgentSwitch URLs, logins or live record data. Enter only dummy data in a competitor trial.
 
-Labels: **observed** = seen in a trial or a running copy; **documented** = in the vendor's own docs or
-changelog; **claimed** = marketing page or blog only; **unverified** = not checked yet. Give every
-entry the date it was checked.
+Labels: **observed** = seen in a trial or a running copy; **documented** = in the vendor's technical
+docs, changelog or source code; **claimed** = marketing page, blog, pricing, FAQ or company page;
+**unverified** = not checked yet. Give every entry the date it was checked.
 
-Status (2026-09-17): the plan is agreed and nothing has been studied yet. The web screen below is
-a first pass, not the study itself.
+Status (2026-09-17): the plan is agreed and nothing has been studied hands-on yet. The screen below
+combines our web screen, a second screen by another AI search agent, and our own check of the load-bearing
+claims on the vendors' pages and Carbon's source.
 
 ## Picks
 
 | Role | Product | Why |
 | --- | --- | --- |
-| Primary | **Carbon** ([carbon.ms](https://carbon.ms/), source [crbnos/carbon](https://github.com/crbnos/carbon)) | A young product with an open-source ERP, MES and QMS on one database. It ships its own MCP server over manufacturing data, the closest match to the brief's Rillet example. It is the easiest product to inspect: 30-day trial, self-hosting with demo data, readable source. |
-| Secondary, docs only | **Fulcrum** ([fulcrumpro.com](https://fulcrumpro.com/), [MCP docs](https://developers.fulcrumpro.com/mcp)) | Its MCP tools are the closest match to our request: overdue and at-risk jobs, schedule health and capacity, update priorities, run the scheduler. Older (founded 2015) and sold by demo, so study only the public docs. |
+| Primary | **Carbon** ([carbon.ms](https://carbon.ms/), source [crbnos/carbon](https://github.com/crbnos/carbon)) | A young open-core ERP and MES (public repo created 2024-06). It ships its own MCP server over manufacturing data, the closest match to the brief's Rillet example. It is the easiest product to inspect: public scheduling docs, a public MCP tool list in its source, and a 30-day trial for the UI. The trial does not include MCP (see below). |
+| Secondary, docs only | **Fulcrum** ([fulcrumpro.com](https://fulcrumpro.com/), [MCP capabilities](https://developers.fulcrumpro.com/mcp/capabilities)) | Its MCP capabilities match our request most directly: at-risk jobs, update priorities and due dates, trigger scheduling runs, schedule health. It dates from 2015 and has no self-serve trial, so study only the public docs. |
 
-**Swap rule:** if the first hour shows that Carbon's scheduling or its MCP write tools are thin,
-make Fulcrum primary.
+**Fallback rule:** Fulcrum is harder to inspect than Carbon, so it never becomes primary. If Carbon's
+MCP cannot be reached (the trial is Starter, which rejects API keys), study Carbon's agent surface
+from its public source and docs, and keep Fulcrum as the docs-only secondary. Revisit the pick only
+if Carbon's scheduling or its MCP write tools turn out thin in the docs or source.
 
-Not picked (web screen, 2026-09-17):
+Not picked (screened 2026-09-17):
 
 - **SkyPlanner APS:** finite-capacity scheduler with an AI engine (Arcturus) and a REST API; no MCP
   found. It optimises schedules but is not built around an agent driving it.
@@ -29,47 +32,71 @@ Not picked (web screen, 2026-09-17):
   MCP found; demo only.
 - **Tulip:** ships an MCP server (June 2025) over stations, machines and tables. It is a frontline
   operations platform, not a scheduler.
+- **Katana:** first-party hosted MCP that can read, create and update manufacturing orders, BOMs and
+  operation rows (no deletes), and a free plan. Its MCP overview says nothing about scheduling,
+  priority or deadlines, so it has no documented agent-driven rescheduling
+  ([MCP overview](https://support.katanamrp.com/en/articles/15502865-katana-mcp-overview), documented).
+- **First Resonance ION:** manufacturing plans and BOM demand; MCP in beta; demo-led access. Its
+  Autoplan "is currently an infinite capacity model"
+  ([Autoplan](https://manual.firstresonance.io/plans-and-autoplan/autoplan), documented).
+- **MRPeasy:** finite-capacity scheduling in the UI, but its MCP is reported read-only (GET endpoints
+  only), so it cannot reschedule (second screen, unverified by us).
+- **Tangle:** AI-native manufacturing ERP (Milo assistant). Its platform page mentions APIs and
+  webhooks but no MCP or technical docs, so its scheduling claims are marketing only (claimed).
 - **ERPNext:** AgentSwitch's manufacturing entities mirror it (WorkOrder, JobCard, `docstatus`).
   Use it for calibration, not as "the best product" (inferred).
 
-## First screen (unverified until the study confirms it)
+## Screen results (checked 2026-09-17)
 
-| Claim | Product | Source (checked 2026-09-17) | Label |
+| Claim | Product | Source | Label |
 | --- | --- | --- | --- |
-| Hosted MCP server; read and write on inventory, work orders, purchase orders, quotes, quality | Carbon | [MCP for manufacturing](https://carbon.ms/learn/mcp-for-manufacturing) | claimed |
-| Built-in MCP server exposing 1,374 operations across 15 modules through three discovery tools | Carbon | search-result excerpt from carbon.ms (page not opened); same pitch in the [GitHub README](https://github.com/crbnos/carbon) | claimed |
-| An agent can "reschedule a job" through MCP | Carbon | search-result excerpt from carbon.ms (page not opened) | claimed |
-| Finite-capacity scheduling against machine calendars; moving a job updates material needs and due dates | Carbon | [What is production planning](https://carbon.ms/learn/what-is-production-planning) (published 2026-08-16) | claimed |
-| Capacity planning, MRP, job operations, traceability, nested BOMs | Carbon | [GitHub README](https://github.com/crbnos/carbon) (AGPL-3.0) | documented |
-| Docs navigation has a Production section but no visible scheduling or MCP page | Carbon | [docs.carbon.ms](https://docs.carbon.ms/docs) | observed on the web |
-| 30-day free trial | Carbon | the two carbon.ms blog pages above (they offer it) | claimed |
-| $4.3M seed round | Carbon | search result pointing to a founder's LinkedIn post dated 2025-09-05 (not opened) | unverified |
-| MCP server announced 2026-04-07: look up jobs, sales orders, work orders, equipment, NCRs; dashboards for schedule health and capacity; approve POs, move jobs through workflows, update priorities, run the scheduler | Fulcrum | [product update](https://fulcrumpro.com/product-update/fulcrum-mcp-server-connect-ai-tools-directly-to-your-shop-data), [MCP docs](https://developers.fulcrumpro.com/mcp) | documented |
-| Founded 2015; custom pricing by shop revenue and integrations | Fulcrum | review-site listings | unverified |
+| Hosted MCP server at `<host>/api/mcp`, three meta-tools `search_tools`, `describe_tool`, `call_tool`; API-key or browser auth; a key scoped to View only is read-only | Carbon | [MCP docs](https://docs.carbon.ms/mcp) | documented |
+| MCP and API need the Business plan on Carbon Cloud ("Starter keys are rejected with 403"); self-hosted MCP needs an Enterprise licence | Carbon | [MCP docs](https://docs.carbon.ms/mcp) | documented |
+| Pricing: Starter $40/user/month (no API); Business $100/user/month, 5-user minimum (API, webhooks, integrations); Enterprise custom. 30-day free trial, no sales call, on Starter | Carbon | [pricing](https://carbon.ms/pricing) | claimed |
+| The full MCP tool list is public: `tool-manifest.digest.json` lists 1,564 tools (798 read, 533 write, 233 destructive) with classification and permission per tool | Carbon | [source](https://github.com/crbnos/carbon), `apps/erp/app/routes/api+/mcp+/lib/tool-manifest.digest.json` on `main` | documented |
+| Scheduling and request-relevant tools in that list. Write: `production_scheduleJob`, `production_updateJobOperationDueDate`, `production_calculateJobPriority`, `production_notifyScheduleInputsChanged`. Read: `production_getJobExpediteForecast`, `production_getUnscheduledJobs`, `production_getJobMaterialShortfallByItem`, `production_getJobMaterialSupplyJobLines`, `production_getCapacityReservationsByJob`, `production_getMaintenanceDowntimeForResources`, `resources_getWorkCentersListWithBlockingStatus` | Carbon | same file | documented (names only; behaviour untested) |
+| Tool counts differ between pages (1,374 on the homepage; 1,564 in the docs and source; other pages say 1,200+, 1,400+, 1,482). Do not quote a count in the report | Carbon | [homepage](https://carbon.ms/), [MCP tools](https://docs.carbon.ms/mcp/tools) | documented |
+| Finite-capacity scheduler: one operation at a time per work centre, inside shift hours; maintenance windows subtract downtime; operations need a qualified operator on shift; forward placement after predecessors | Carbon | [scheduling reference](https://docs.carbon.ms/docs/reference/scheduling) | documented |
+| Lateness and explanations: operations projected past the due date show amber; unschedulable operations get an "Unschedulable" chip with notes on why; schedule notes explain waits | Carbon | same page | documented |
+| Replanning: edits to due dates, shifts, work-centre hours, qualifications or process requirements trigger a replan after about 30 seconds; status changes reschedule immediately; planners drag jobs on a Priorities board | Carbon | same page | documented |
+| The raw Data API (for example job-operation `dueDate`, `workCenterId`, `priority`, `manuallyScheduled`) does not recalculate: "Nothing here validates, recalculates, or posts". Rescheduling goes through the service tools above, not table writes | Carbon | [job-operation Data API](https://docs.carbon.ms/api-reference/production/job-operation) | documented |
+| Open core: Community edition (ERP + MES) is AGPLv3 and self-hostable; Enterprise features (`packages/ee`) are commercial. Which features are Enterprise-only is not listed | Carbon | [licensing](https://docs.carbon.ms/docs/platform/licensing) | documented |
+| $4.3M seed round | Carbon | search result pointing to a founder's LinkedIn post dated 2025-09-05 (not opened); the second screen found no reliable source | unverified — do not use |
+| MCP server announced 2026-04-07 | Fulcrum | [product update](https://fulcrumpro.com/product-update/fulcrum-mcp-server-connect-ai-tools-directly-to-your-shop-data) | documented |
+| MCP capability groups: Jobs ("surface at-risk jobs, change statuses, update priorities and due dates"); Sales Orders ("linked jobs"); Work Orders; Equipment ("check backlogs"); Scheduling & Capacity ("identify bottlenecks, trigger scheduling runs"); Dashboards ("schedule health", "demand planning"). The tool list "is actively evolving"; no public tool names or schemas | Fulcrum | [MCP capabilities](https://developers.fulcrumpro.com/mcp/capabilities) | documented |
+| No self-serve free trial ("guided demos"); pricing by company size and scope, not per user | Fulcrum | [FAQ](https://fulcrumpro.com/faq) | claimed |
+| Founded 2015 | Fulcrum | [company page](https://fulcrumpro.com/grow) | claimed |
 
 ## Method (about one team-day)
 
-1. **Screen (1 h).** Check the unverified rows above. For Carbon, find the scheduling and MCP tool docs
-   or read the source. Decide whether the swap rule applies.
-2. **Primary (4–5 h).** Read the docs, changelog (last 12–18 months), API and MCP tool list, and the
-   pricing page. Then run one scenario in a trial or self-hosted copy, using dummy data:
-   - a sub-assembly work order that is late;
-   - two work orders that consume that sub-assembly;
-   - a component shortage;
-   - a machine that is down.
+1. **Screen (1 h).** Read Carbon's scheduling reference and MCP docs, and the `describe_tool` schemas
+   or service code behind the tools above. Decide whether Carbon's scheduling and MCP writes are thin
+   (fallback rule).
+2. **Primary (4–5 h), in two parts.**
+   - **UI scenario (Starter trial or self-hosted Community copy, dummy data only):**
+     - a sub-assembly job that is late;
+     - two jobs that consume that sub-assembly;
+     - a component shortage;
+     - a work centre in maintenance.
 
-   Record what the product shows for the cause, the downstream impact and the reschedule, and how
-   many clicks or tool calls each step takes.
-3. **Secondary (1 h).** Read Fulcrum's MCP Tools and Permissions & Safety pages, then the scheduling
-   docs, for the same four steps.
+     Record what Carbon shows for the cause, the downstream impact and the reschedule, and how many
+     clicks each step takes. Smallest useful check: change one due date or shift, wait for the replan,
+     and re-read the schedule to confirm the placement moved.
+   - **Agent surface (no paid plan needed):** from the public tool list and source, write down which
+     tool calls an agent would make for each of the four steps, with each tool's classification and
+     permission. Mark it "from source, not run".
+   - A live MCP run needs Business ($100/user/month, 5-user minimum) or an Enterprise self-hosted
+     licence. That is a team decision, not part of the default plan.
+3. **Secondary (1 h).** Read Fulcrum's MCP capabilities, getting-started and Permissions & Safety
+   pages, then its scheduling docs, for the same four steps.
 4. **Write-up (2 h).** Fill the comparison table below, then the gap report.
 
 For each claim, record the link, the date checked, a screenshot or video timestamp, the pricing tier
 it needs, and its label. The study is deep enough when each checklist row has a source or reads "not
 documented", and the gap report has 3–5 defensible gaps.
 
-**Human steps:** trial sign-up, self-hosting, demo booking and any contact with a vendor. A teammate
-does these; the AI does not.
+**Human steps:** trial sign-up, self-hosting, any paid plan, demo booking and any contact with a
+vendor. A teammate does these; the AI does not.
 
 ## Checklist
 
@@ -125,8 +152,10 @@ Starting hypotheses from the domain notes (inferred, to be confirmed against the
 
 ## Risks
 
-- Picking a product we cannot inspect turns the report into marketing paraphrase. Apply the swap rule
-  early.
-- An announced feature is not a shipped one. Look for a changelog entry or docs page.
+- Picking a product we cannot inspect turns the report into marketing paraphrase. Apply the fallback
+  rule early.
+- An announced feature is not a shipped one. Look for a changelog entry, docs page or source.
+- A tool name is not behaviour. Tools read from source stay "not run" until a live call.
+- Vendor counts and dates move quickly; record the date and the exact wording.
 - A permission refusal or seat boundary filed as a platform gap makes Q2 wrong.
 - Screenshots of our own platform must not show record ids or tenant URLs.
