@@ -10,7 +10,8 @@ docs, changelog or source code; **claimed** = marketing page, blog, pricing, FAQ
 
 Status (2026-09-17): the plan is agreed and nothing has been studied hands-on yet. The screen below
 combines our web screen, a second screen by another AI search agent, and our own check of the load-bearing
-claims on the vendors' pages and Carbon's source.
+claims on the vendors' pages and Carbon's source. The Carbon agent surface has been studied from source
+([below](#carbon-agent-surface-from-source)); nothing was run.
 
 ## Picks
 
@@ -66,6 +67,67 @@ Not picked (screened 2026-09-17):
 | MCP capability groups: Jobs ("surface at-risk jobs, change statuses, update priorities and due dates"); Sales Orders ("linked jobs"); Work Orders; Equipment ("check backlogs"); Scheduling & Capacity ("identify bottlenecks, trigger scheduling runs"); Dashboards ("schedule health", "demand planning"). The tool list "is actively evolving"; no public tool names or schemas | Fulcrum | [MCP capabilities](https://developers.fulcrumpro.com/mcp/capabilities) | documented |
 | No self-serve free trial ("guided demos"); pricing by company size and scope, not per user | Fulcrum | [FAQ](https://fulcrumpro.com/faq) | claimed |
 | Founded 2015 | Fulcrum | [company page](https://fulcrumpro.com/grow) | claimed |
+
+## Carbon agent surface (from source)
+
+Read on 2026-09-17 from [crbnos/carbon](https://github.com/crbnos/carbon) at commit `0bbb3b53`, with
+the tool classification and permission from `tool-manifest.digest.json`. Everything here is
+**documented (source), not run**. File paths are relative to the repo root.
+
+### Our request as Carbon tool calls
+
+| Step | MCP tools (classification, permission) | What the source shows |
+| --- | --- | --- |
+| Find the late job | `production_getJobs`, `production_getJob` (read, `production:view`); `production_getUnscheduledJobs` (read) | A job carries `dueDate`, `deadlineType`, `priority`, `projectedCompletionAt` and a schedule-outdated stamp. |
+| Why is it late | `production_getJobOperationsForTimeline` (read); `production_getJobExpediteForecast` (read, what-if, persists nothing); `production_getCapacityReservationsByJob`, `production_getMaintenanceDowntimeForResources`, `resources_getWorkCentersListWithBlockingStatus` (read) | Every operation stores `hasConflict` and a `conflictReason` sentence. The scheduler classifies each late placement as one of: queued behind other jobs on the machine (naming them), behind this job's own operations, machine wait, operator queue (naming the jobs), no qualified operator on shift, waiting for assigned people, inherited delay from a named predecessor, no runway before the due date, or outside processing (`packages/ee/src/planning/scheduling/conflict-messages.ts`). The expedite forecast returns a projected completion and a cause sentence, including the first operation behind its target. |
+| Material cause | `production_getJobMaterialShortfallByItem`, `production_getJobMaterialsWithQuantityOnHand`, `production_getJobPurchaseOrderLines` (read) | Shortfall allocates on-hand stock first, then incoming purchase and production orders, across active jobs at the location by priority. Material is **not** a scheduling constraint: the finite scheduler gates only on work centre and operator, so a shortage never appears as a late cause. The agent has to join the two. |
+| What it blocks downstream | `production_getJobMethodTree` (read); `production_getJobMaterialSupplyJobLines` (read); `sales_getSalesOrder`, `sales_getSalesOrderLines` (read, `sales:view`) | Inside a job, make-to-order sub-assemblies are a method tree with operation dependencies, so a late sub-assembly shows up as "inherited delay" on its parent. Across jobs, `getJobMaterialSupplyJobLines` returns only the item and status of active jobs making a material, with no allocation to a specific consuming job (no pegging found). A job links to its sales order line. A replan lists **newly late** jobs, and the replan wave sends a "jobs projected late" notification to each assignee. |
+| Reschedule | `production_updateJob` (write: `dueDate`, `priority`, `deadlineType`); `production_updateJobOperationDueDate` (write: pins an operation's need-by date); `production_calculateJobPriority` (write); `production_scheduleJob` (write, re-checks `production:update`); `production_notifyScheduleInputsChanged` (write) | Placement is always forward, as soon as possible: **due dates are targets, never placement constraints**. So moving a date changes lateness flags and priority order, not where work is placed. The placement moves through priority, work centre, shifts or people, then a replan. |
+| Re-read | `production_getJob`, `production_getJobOperationsForTimeline` (read) | The replan writes new `startDate`, `projectedCompletionAt`, conflict flags and capacity reservations, and clears the stale stamp. |
+
+### Findings
+
+- **An MCP write does not replan by itself.** The UI route that pins an operation due date calls
+  `updateJobOperationDueDate` and then `notifyScheduleInputsChanged`
+  (`apps/erp/app/routes/x+/job+/methods+/operation.due-date.tsx`). The service functions exposed over
+  MCP do only the update (`updateJob` also recalculates priority). An agent must then call
+  `production_scheduleJob` (regenerates the whole location now) or
+  `production_notifyScheduleInputsChanged` (marks jobs stale; a replan wave follows after a 30-second
+  debounce). Otherwise the schedule stays stale until the nightly replan at 01:00
+  (`.claude/rules/scheduling-data-structures.md`).
+- **Replanning is location-wide.** `scheduleJob` regenerates every open job at the job's location, not
+  just one job. One agent call can move many other jobs.
+- **Permission checks are per tool, not central.** A comment in `production.mcp.server.ts` says the MCP
+  executor "performs no per-tool permission check"; sensitive tools such as `scheduleJob` re-apply the
+  gate inline. `mcp-blocked-tools.ts` blocks the raw schedule trigger and some tenant-level tools.
+- **The scheduler, MRP and expedite what-if are Enterprise code.** They live in `packages/ee/src/planning`
+  (`runLocationSchedule`, `runExpediteWhatIf`, `runMrp`). Licensing says Community mode "ships without
+  EE features", so a self-hosted Community copy most likely has no finite scheduler (inferred; not
+  run). Whether the Starter cloud trial includes it is unverified.
+- **Cross-job dependency is weak.** `job.parentJobId` exists in the service layer, but we did not find
+  it used for scheduling or impact. Downstream impact across jobs comes from "newly late" after a replan
+  and from sales order links, not from explicit pegging.
+
+### What this means for the gap report (inferred, to confirm in the UI run)
+
+- **Q1 candidates, what Carbon has that we lack:**
+  - A per-operation late cause naming the blocking jobs or the late predecessor. Our `finite_schedule`
+    gives one generic cause code with empty `causes[].downtime` and `causes[].blocking`.
+  - A simulate-only expedite forecast.
+  - Forward finite placement over shifts, maintenance downtime and operator qualifications.
+  - A list of jobs made newly late by a replan, pushed to assignees.
+  - Writable due dates and priority with a replan.
+- **Shared weakness:** neither system pegs a sub-assembly's supply to a specific consuming order.
+  Carbon links sub-assemblies inside one job; we infer them across work orders from BOM materials.
+- **Q3 angle:** Carbon exposes the parts, but the agent must still join schedule causes with material
+  shortfall, trigger a replan after a write, accept that the replan is location-wide, and re-read.
+  That is the multi-step orchestration our agent does (not demonstrated end to end in Carbon's docs).
+
+### Open questions for the hands-on run
+
+- Does the Starter trial run the Enterprise scheduler (Forecast page, amber flags, expedite dialog)?
+- After a job due-date change in the UI, how long until the placement and conflict flags update?
+- What does the expedite dialog show for a job blocked by a material shortage but not by capacity?
 
 ## Method (about one team-day)
 
