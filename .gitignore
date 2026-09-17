@@ -1,0 +1,20 @@
+# Secrets. Only .env.example is committed.
+.env
+.env.*
+!.env.example
+
+# Python and tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+
+# Harness run records. Kept on disk as scoring evidence, not committed:
+# they hold live tenant data. Root-anchored so a future docs/runs/ is not swallowed.
+/runs/
+
+# Raw dumps from the live platform (schemas, tools/list, records).
+/dumps/

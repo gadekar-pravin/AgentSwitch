@@ -1,0 +1,27 @@
+[project]
+name = "agentswitch"
+version = "0.1.0"
+description = "Seat 04 Production agent and harness for the AgentSwitch capstone"
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
+
+[tool.uv]
+# No importable package yet. Add one when the agent code lands.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.lint]
+# Pinned so every machine checks the same rules.
+select = ["E4", "E7", "E9", "F", "W", "I"]
