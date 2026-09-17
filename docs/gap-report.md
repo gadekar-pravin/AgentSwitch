@@ -1,4 +1,6 @@
-# AgentSwitch can investigate late work, but Carbon has the stronger scheduling engine
+# Gap report — AgentSwitch vs [Carbon](https://carbon.ms/)
+
+**AgentSwitch can investigate late work, but Carbon has the stronger scheduling engine.**
 
 ## Executive summary
 
