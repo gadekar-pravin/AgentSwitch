@@ -230,14 +230,17 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
 
 ## Bug reports filed
 
-From `GET /api/bug-report/mine` on Suryodaya, 2026-09-17. All status `new`, stored locally (no
-GitHub issue, as expected).
+Reports are stored per instance: `GET /api/bug-report/mine` on Suryodaya does not show reports
+filed on Keystone. Check both before filing. Listed 2026-09-17; all status `new`, stored locally
+(no GitHub issue, as expected).
 
-| Filed | Title |
-| --- | --- |
-| 2026-09-16 | JobCard and DowntimeEntry are unreadable for manufacturing_user, though the schema grants read (both instances) |
-| 2026-09-16 | finite_schedule returns JobCard ids that JobCard.get reports as not found |
-| 2026-09-16 | Admin-only transitions are listed in tools/list for manufacturing_user |
-| 2026-09-16 | finite_schedule never attributes downtime or blocking to late orders |
-| 2026-09-17 | Follow-up to the JobCard/DowntimeEntry report: EngineeringChangeOrder is unreadable too |
-| 2026-09-17 | finite_schedule exposes downtime and job-card data that the entity tools refuse (follow-up to the row-scope and job-card-id reports) |
+| Instance | Filed | Title |
+| --- | --- | --- |
+| Suryodaya | 2026-09-16 | JobCard and DowntimeEntry are unreadable for manufacturing_user, though the schema grants read (both instances) |
+| Suryodaya | 2026-09-16 | finite_schedule returns JobCard ids that JobCard.get reports as not found |
+| Suryodaya | 2026-09-16 | Admin-only transitions are listed in tools/list for manufacturing_user |
+| Suryodaya | 2026-09-16 | finite_schedule never attributes downtime or blocking to late orders |
+| Suryodaya | 2026-09-17 | Follow-up to the JobCard/DowntimeEntry report: EngineeringChangeOrder is unreadable too |
+| Suryodaya | 2026-09-17 | finite_schedule exposes downtime and job-card data that the entity tools refuse (follow-up to the row-scope and job-card-id reports) |
+| Keystone | 2026-09-16 | Keystone Workstation numbers contain the literal format token |
+| Keystone | 2026-09-17 | Keystone: Workstation numbers are malformed (duplicate of the report above, filed before we saw it; adds that all 12 Keystone SerialNumbers have an empty `number`) |
