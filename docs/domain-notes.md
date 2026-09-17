@@ -244,13 +244,16 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
 - Look at a few late work orders in the UI to confirm which date the business treats as "late".
 - Agree as a team before any write test, e.g. `WorkOrder.update` on dates for a `draft`,
   `in_progress` or `stopped` work order the team created.
-- Check `GET /api/bug-report/mine` for resolution notes before building around a refusal.
+- Check `GET /api/bug-report/mine` and the [live bug tracker](https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h)
+  for resolution notes before building around a refusal.
 
 ## Bug reports filed
 
 Reports are stored per instance: `GET /api/bug-report/mine` on Suryodaya does not show reports
 filed on Keystone. Check both before filing. Listed 2026-09-17; all status `new`, stored locally
 (no GitHub issue, as expected).
+
+Live tracker for bug reports and fixes: <https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h>.
 
 | Instance | Filed | Title |
 | --- | --- | --- |

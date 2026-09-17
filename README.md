@@ -64,6 +64,9 @@ curl -s "$AS/api/auth/me" -H "Authorization: Bearer $TOKEN"
 Reading material on the live instance (login required): `$AS/docs`, `$AS/redoc`,
 `$AS/api/schemas`, `$AS/api/agent/tools`.
 
+Bug reports and fixes: [live tracker](https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h); the reports we filed are
+listed in [docs/domain-notes.md](docs/domain-notes.md#bug-reports-filed).
+
 ## Checks
 
 ```bash
