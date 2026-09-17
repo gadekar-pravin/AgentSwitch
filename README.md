@@ -4,7 +4,7 @@ Capstone project for the EAG V3 Agentic AI course. We build an agent for the
 **Production** seat (app `manufacturing`: work orders, BOMs, routings, job
 cards) that drives the AgentSwitch platform over MCP, plus a harness that proves
 it works. The assignment is the course brief `agentswitch-team-brief.md` (kept out of git); a plain-language
-summary is in [docs/assignment-overview.md](docs/assignment-overview.md).
+summary is in [assignment-overview.md](assignment-overview.md).
 
 The request our agent must handle:
 

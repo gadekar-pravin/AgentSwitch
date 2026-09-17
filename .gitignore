@@ -19,7 +19,7 @@ __pycache__/
 # Raw dumps from the live platform (schemas, tools/list, records).
 /dumps/
 
-# Course brief: kept locally only, not published. docs/assignment-overview.md is our public summary.
+# Course brief: kept locally only, not published. assignment-overview.md is our public summary.
 /agentswitch-team-brief.md
 
 # Personal Claude Code instructions. Team rules live in CLAUDE.md.

@@ -122,6 +122,6 @@ Ask the instructor or check the team channel.
    `allowed_apps` with an authenticated `GET /api/auth/me`. (This repo keeps the passwords in a
    gitignored `.env`; that is our choice, not a brief requirement.)
 2. Spend time in the UI on real manufacturing records; record findings in
-   [domain-notes.md](domain-notes.md).
-3. Pick the competitor product and start [gap-report.md](gap-report.md).
+   [docs/domain-notes.md](docs/domain-notes.md).
+3. Pick the competitor product and start [docs/gap-report.md](docs/gap-report.md).
 4. Then build the MCP client and pull the seat's schemas and tool list.
