@@ -40,18 +40,19 @@ Not in git, set up locally by each teammate:
 
 ## Platforms
 
-| Tenant | Business | URL |
+| Tenant | Business | URL variable in `.env` |
 | --- | --- | --- |
-| `suryodaya` | Suryodaya Precision Works (India, GST) | <Suryodaya URL from the brief> |
-| `keystone` | Keystone Precision Works LLC (US, Sales & Use Tax) | <Keystone URL from the brief> |
+| `suryodaya` | Suryodaya Precision Works (India, GST) | `AS_URL_SURYODAYA` |
+| `keystone` | Keystone Precision Works LLC (US, Sales & Use Tax) | `AS_URL_KEYSTONE` |
 
-Start on Suryodaya. Same email on both; the password differs per business.
+The URLs are in the course brief; they are kept out of this repo. Start on Suryodaya. Same email on
+both; the password differs per business.
 
 Quick manual check (from the brief §5–6):
 
 ```bash
-set -a; source .env; set +a    # loads AS_EMAIL and the passwords into this shell
-export AS=<Suryodaya URL from the brief>
+set -a; source .env; set +a    # loads the URLs, AS_EMAIL and the passwords into this shell
+export AS="$AS_URL_SURYODAYA"
 export TOKEN=$(curl -s -X POST "$AS/api/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$AS_EMAIL\",\"password\":\"$AS_PASSWORD_SURYODAYA\"}" \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
