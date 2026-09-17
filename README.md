@@ -4,7 +4,7 @@ Capstone project for the EAG V3 Agentic AI course. We build an agent for the
 **Production** seat (app `manufacturing`: work orders, BOMs, routings, job
 cards) that drives the AgentSwitch platform over MCP, plus a harness that proves
 it works. The assignment is the course brief `agentswitch-team-brief.md` (kept out of git); a plain-language
-summary, `docs/assignment-overview.md`, is also kept out of git.
+summary is in [docs/assignment-overview.md](docs/assignment-overview.md).
 
 The request our agent must handle:
 
@@ -35,7 +35,6 @@ cp .env.example .env    # then fill in the passwords from the team channel
 Not in git, set up locally by each teammate:
 
 - `agentswitch-team-brief.md` — copy the course brief to the repo root (it is gitignored).
-- `docs/assignment-overview.md` — the team's summary of the brief; shared outside git (gitignored).
 - `CLAUDE.local.md` — optional personal Claude Code instructions. Claude Code loads it after the
   shared [CLAUDE.md](CLAUDE.md), which holds the team rules (including: AI must not write tests).
 
