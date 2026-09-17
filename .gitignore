@@ -19,8 +19,9 @@ __pycache__/
 # Raw dumps from the live platform (schemas, tools/list, records).
 /dumps/
 
-# Course brief: kept locally only. Each teammate places their own copy at the repo root.
+# Course brief and our summary of it: kept locally only, not published.
 /agentswitch-team-brief.md
+/docs/assignment-overview.md
 
 # Personal Claude Code instructions. Team rules live in CLAUDE.md.
 CLAUDE.local.md
