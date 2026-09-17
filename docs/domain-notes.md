@@ -6,7 +6,14 @@ observed, on which tenant (Suryodaya or Keystone) and when. Keep raw dumps in
 
 ## Identity
 
-- `GET /api/auth/me` → roles: _TBD_; allowed_apps: _TBD_
+Checked 2026-09-17 with `GET /api/auth/me`, login `team04`:
+
+| Tenant | Roles | allowed_apps |
+| --- | --- | --- |
+| Suryodaya | `manufacturing_user`, `user`, `viewer`, `agent_user` | `manufacturing`, `agent`, `crm` |
+| Keystone | `manufacturing_user`, `user`, `agent_user` | `manufacturing`, `agent`, `crm` |
+
+Keystone has no `viewer` role. Check whether that changes the tool list between tenants.
 
 ## Entities and workflow states
 

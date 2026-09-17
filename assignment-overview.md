@@ -42,6 +42,9 @@ competing product in manufacturing and write a one-page gap report.
 
 ## The order of work (§8)
 
+Section 8 is what we are graded on. The instructor's note (2026-09-17) says to read it twice, and that
+step 2 is the one teams skip.
+
 1. **Learn the domain.** Use the web UI to look at real work orders, BOMs, routings and job cards.
    Read `/api/schemas` for their fields and workflow states. Most objects move through a state
    machine, and the transitions carry the rules.
@@ -57,7 +60,10 @@ competing product in manufacturing and write a one-page gap report.
 4. **Build the agent, then the harness.** The agent answers the seat's questions; the harness proves
    that it does.
 
-The brief's worked example (Ledger seat vs Rillet) shows the expected depth.
+The brief's worked example (Ledger seat vs Rillet) shows the expected depth. The instructor picked
+Rillet because it already ships an MCP server over its own ledger: a competitor has built, in public,
+the thing the Ledger teams are asked to build. Our reading: the strongest pick for us is a
+manufacturing product that already exposes an agent or MCP layer, if one exists.
 
 ## Our request
 
@@ -96,7 +102,9 @@ The reschedule is a real write on shared data, attributed to our login (§9).
   page, agent seat and job id. File them with the in-app "Report a problem" button or
   `POST $AS/api/bug-report`; the limit is 20 per hour. Some behaviours are known and not worth
   reporting (§10).
-- **Our passwords are ours alone** (§9). Every write is attributed to whoever is signed in.
+- **Our passwords are ours alone** (§9). Every write is attributed to whoever is signed in, so
+  anyone holding our password can act as us. Do not paste logins, passwords or platform URLs
+  outside the team (instructor's note); they are kept out of this public repo.
 
 ## Open questions (not answered by the brief)
 
@@ -118,10 +126,11 @@ Ask the instructor or check the team channel.
 
 ## Next steps
 
-1. Get our two logins from the team channel (§9). Log in as in §5, then confirm roles and
-   `allowed_apps` with an authenticated `GET /api/auth/me`. (This repo keeps the passwords in a
-   gitignored `.env`; that is our choice, not a brief requirement.)
+1. ~~Get our two logins and confirm them with `GET /api/auth/me`.~~ Done 2026-09-17 on both
+   businesses; results in [docs/domain-notes.md](docs/domain-notes.md). (This repo keeps the logins
+   in a gitignored `.env`; that is our choice, not a brief requirement.)
 2. Spend time in the UI on real manufacturing records; record findings in
    [docs/domain-notes.md](docs/domain-notes.md).
-3. Pick the competitor product and start [docs/gap-report.md](docs/gap-report.md).
+3. Pick the competitor product and write [docs/gap-report.md](docs/gap-report.md): one page, due
+   week one (§8 step 3).
 4. Then build the MCP client and pull the seat's schemas and tool list.

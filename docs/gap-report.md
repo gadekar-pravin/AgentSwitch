@@ -1,11 +1,11 @@
 # Gap report — seat 04 Production
 
-Due in week one. One page. Answer with specifics: name features, records and
+Due in week one (§8 step 3). One page. Answer with specifics: name features, records and
 tools, not impressions.
 
 ## Product studied
 
-- **Product:** _TBD_ (prefer an AI-native manufacturing / MES / production-planning product built in the last three years)
+- **Product:** _TBD_ (prefer an AI-native manufacturing / MES / production-planning product built in the last three years; ideally one that already ships an agent or MCP layer, as Rillet does for the Ledger example)
 - **Why this one:** _TBD_
 - **How we studied it:** trial account, demos, docs, changelog, pricing page — list what was actually used, with dates and links.
 

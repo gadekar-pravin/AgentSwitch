@@ -2,7 +2,8 @@
 
 Shared team guidance for Claude Code in this repository. The assignment is
 [agentswitch-team-brief.md](agentswitch-team-brief.md); read it before non-trivial work. The brief is
-kept out of git: each teammate places the course copy at the repo root. If it is missing, say so
+kept out of git: it is a saved copy of the AgentSwitch brief lesson on the course site, and each
+teammate places that copy at the repo root. Do not download the lesson again. If it is missing, say so
 rather than guessing requirements; [assignment-overview.md](assignment-overview.md) is a
 summary, not the source.
 
