@@ -36,8 +36,9 @@ tests, explaining failures and proposing what a test should check (in prose) are
 - **A JSON-RPC error comes back on HTTP 200.** Check the envelope; only auth failures are `401`.
 - **The tool catalogue is seat-scoped and schemas are closed.** Use only tool names returned by
   `tools/list` and only the arguments in each tool's schema. Never guess a name or argument.
-- **403 on another app's data is the seat boundary, not a bug.** Escalate (EA, admin, human);
-  do not work around it.
+- **The seat boundary looks different per door.** Over MCP, a tool the seat may not use is absent
+  from `tools/list`; it is never offered and then refused. Over REST and the UI, another app's data
+  returns `403`. Neither is a bug. Escalate (EA, admin, human); do not work around it.
 - **The book is shared and changes underneath us.** Re-read a record immediately before writing.
   Writes that the task requires (e.g. rescheduling a late work order) are allowed within seat
   permissions and workflow rules. Never "tidy up", delete or bulk-edit data the task did not ask

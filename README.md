@@ -1,4 +1,4 @@
-# AgentSwitch — Team 04, Production
+2# AgentSwitch — Team 04, Production
 
 Capstone project for the EAG V3 Agentic AI course. We build an agent for the
 **Production** seat (app `manufacturing`: work orders, BOMs, routings, job
@@ -17,7 +17,7 @@ The request our agent must handle:
 | Domain notes | [docs/domain-notes.md](docs/domain-notes.md) | not started |
 | Agent (MCP client + loop) | _not created yet_ | after domain learning |
 | Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | _not created yet_ | after the agent |
-| Hand-written tests | [tests/](tests/README.md) | none yet |
+| Hand-written tests (team members only; AI-written tests score zero) | `tests/` (create when writing the first test) | none yet |
 
 Order follows the brief: learn the domain, study a leading product, write the
 gap report, then build the agent and harness.

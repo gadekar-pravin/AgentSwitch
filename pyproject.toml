@@ -15,9 +15,6 @@ dev = [
 # No importable package yet. Add one when the agent code lands.
 package = false
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
 [tool.ruff]
 line-length = 110
 target-version = "py313"
