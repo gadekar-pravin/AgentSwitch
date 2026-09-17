@@ -6,8 +6,9 @@ public: record field names and aggregate counts only, no record ids, customer na
 logins.
 
 Status (2026-09-17): plan drafted and advisor-reviewed. Step 1 done by Claude in Chrome, look-only;
-findings in [domain-notes.md](domain-notes.md#ui-walk-observed-2026-09-17). Step 3 skipped by the
-user's decision. Steps 2 and 4 not done.
+findings in [domain-notes.md](domain-notes.md#ui-walk-observed-2026-09-17). Step 2 done; tables in
+[domain-notes.md](domain-notes.md#workorder-links-and-actions). Step 3 skipped by the user's decision.
+Step 4 not done.
 
 ## Starting point
 
@@ -86,11 +87,12 @@ Untested writes do not block finishing Step 1; they block claiming those actions
 
 ## Known corrections to apply
 
-- **A readable work-order-to-work-order link exists (observed in the 2026-09-17 dumps).**
-  `SubcontractOrder.supplied_materials[].batch_id` → `Batch.work_order_id`. On Suryodaya, 94 of 100
-  supplied-material lines carry a batch, and in 93 of them the batch came from a different work order
-  than the subcontract order's own. Keystone has none. This partly contradicts "no work-order-to-work-order
-  link" in domain-notes.md and [gap-report.md](gap-report.md); both need updating.
+- **Withdrawn after step 2:** this plan first said a readable work-order-to-work-order link exists
+  through `SubcontractOrder.supplied_materials[].batch_id` → `Batch.work_order_id` (93 cross-order
+  lines on Suryodaya). The schema path exists, but the data does not hold together: the line item
+  differs from the batch item in 93 of 93, and the batch item is not in the receiving order's BOM in
+  93 of 93 (details in [domain-notes.md](domain-notes.md#links)). "No work-order-to-work-order link"
+  in [gap-report.md](gap-report.md) stands.
 - A shared BOM item shows that one work order **potentially supplies** another, not that it blocks it.
 - Stop and Resume change production state, not dates. They are not rescheduling.
 - WorkOrder `commentable` and `trackable` are in `reserved_behaviors`, not `behaviors`, and no comment

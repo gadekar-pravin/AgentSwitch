@@ -114,6 +114,87 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
 | EngineeringChangeOrder | refused | `bom_id`*, `effectivity_date`, `affected_work_orders[]` (`action`: continue_old / switch_to_new / scrap_and_restart) | draft → submitted → under_review → approved → implemented (review / approve / reject are admin) | Could explain a held work order. |
 | SalesOrder | Suryodaya only | `delivery_date`, `expected_shipment_date`, `delivered_status`, `items[]` | draft → confirmed → partially_delivered → delivered | Read-only for our seat. |
 
+## WorkOrder links and actions
+
+From `/api/schemas` (identical on both tenants), `tools/list` and the 2026-09-17 dumps; plan
+[step 2](domain-learning-plan.md). Child-table links sit under `children.<table>.shape` in the schema,
+not under `fields`, so a scan of `fields` alone misses them.
+
+### Links
+
+Evidence: **schema** = a link field exists; **data** = counts from the dumps (Suryodaya / Keystone).
+
+| Link | Direction | Our seat can read | Data | Use for the agent |
+| --- | --- | --- | --- | --- |
+| `WorkOrder.item_id` → Item | out | yes | all rows | what it makes |
+| `WorkOrder.bom_id` → BOM (`materials[]`, `operations[]`) | out | yes | 123 / 28 (all) | materials, lead times, operations |
+| `WorkOrder.sales_order_id` → SalesOrder | out | Suryodaya only (MCP); UI refuses ("App 'accounting' is not enabled") | 65 / 12 | customer delivery at risk |
+| `WorkOrder.production_plan_id` → ProductionPlan | out | yes | 0 / 0 | none today |
+| `WorkOrder.project_id` → Project | out | no tool | 0 / 12 | escalate if needed |
+| `WorkOrder.design_file_id` → DesignFile | out | no tool | 0 / 12 | none |
+| `WorkOrder.*_warehouse_id` → Warehouse | out | no tool | target 123 / 28 | none |
+| `MaterialRequest.work_order_id` | in | yes | 71 / 4 | material cause |
+| `SubcontractOrder.work_order_id` | in | yes | 94 / 0 | subcontract cause |
+| `QualityInspection.reference_type = WorkOrder`, `reference_id` | in (polymorphic) | yes | 119 / 9, all WorkOrder | quality cause |
+| `Batch.work_order_id`, `SerialNumber.work_order_id` | in | yes | batches 100 / 6 (serial numbers not dumped) | producing order of a lot |
+| `JobCard.work_order_id` | in | refused | — | progress (blocked) |
+| `DowntimeEntry.work_order_id` | in | refused | — | downtime cause (blocked) |
+| `EngineeringChangeOrder.affected_work_orders[].work_order_id` | in (child) | refused | — | ECO hold (blocked) |
+| `SubcontractOrder.supplied_materials[].batch_id` → `Batch.work_order_id` | order → order, indirect | yes | Suryodaya 93 lines where the batch's producing order differs from the subcontract's order; Keystone 0 | **not usable** (see below) |
+| `JobCard.materials_consumed[].batch_id` → `Batch.work_order_id` | order → order, indirect | refused | — | consumption (blocked) |
+
+No field links one WorkOrder directly to another. `BOM.parent_bom_id` is never set.
+
+**The batch supply link does not hold up in the data (Suryodaya, observed in dumps).** Of the 93
+cross-order supplied-material lines: all 93 subcontract orders are `draft` (nothing sent); in 93 the
+line's `item_id` differs from the batch's item; in 93 the batch's item is not a material in the
+receiving order's BOM; 27 batches carry a different item from their producing order; and 15 batches
+belong to orders still `draft` or `not_started`. Batches look randomly wired to orders in the seed
+data. Treat this path as a schema capability only; do not present it as downstream evidence.
+
+### WorkOrder actions
+
+All transition tools take only `id` (no reason or date argument). "Schema role" is from `flow`;
+"tool permission" is `_meta.agentswitch.permission`.
+
+| From | Action (tool) | To | Schema role | Observed | UI (2026-09-17) |
+| --- | --- | --- | --- | --- | --- |
+| — | `WorkOrder.create` | draft | `manufacturing_user` (create) | team04 created drafts (2026-09-16) | New button |
+| draft | `WorkOrder.update` (dates, priority, …) | draft | write | untested (planned test skipped) | no Edit control |
+| draft | Submit (`WorkOrder.submit`) | not_started | `manufacturing_user` | worked: a team04-created order is `not_started`, updated by team04 on 2026-09-16 (inferred from audit fields) | Submit button |
+| not_started | `WorkOrder.update` | — | write | refused: "Cannot modify WorkOrder in 'not_started' status… Cancel first" (reported) | no Edit control |
+| not_started | Start Production (`.start_production`) | in_progress | `manufacturing_user` | untested; may create job cards (`auto_create_job_cards` on, Suryodaya) | button |
+| in_progress | `WorkOrder.update` | — | write | untested | no Edit control |
+| in_progress | Complete (`.complete`) | completed | `manufacturing_user` | untested; may trigger an inspection and auto close (Suryodaya preferences) | button |
+| in_progress | Stop (`.stop`) | stopped | `manufacturing_user` | untested; no reason field | button |
+| stopped | `WorkOrder.update` | — | write | untested | no Edit control |
+| stopped | Resume (`.resume`) | in_progress | `manufacturing_user` | untested | button |
+| any but cancelled | Cancel (`.cancel.<from>.cancelled`, 5 tools) | cancelled | `admin`; tool says `submit` | refused: requires `admin` (reported) | button shown |
+
+No manufacturing flow has a transition `condition` or `auto` rule (some other entities do, e.g.
+Invoice "Mark Overdue" with `today() > due_date`), so the `not_started` update refusal is a server
+rule, not a flow guard (inferred).
+
+### Other WorkOrder fields
+
+| Field | Suryodaya | Keystone | Notes |
+| --- | --- | --- | --- |
+| `approval_status` (`not_required`, `pending_approval`, `approved`, `rejected`) | all `not_required` | 12 `approved` (4 not_started, 6 in_progress, 2 stopped), 16 `not_required` | plain select, no flow; no ApprovalRequest tools for our seat; not shown in the UI. Effect on transitions unknown. |
+| `production_strategy` | 68 make_to_order, 55 make_to_stock | 20 / 8 | shown in the UI header |
+| `quality_inspection_required` | 69 of 123 (33 of the late orders) | 23 of 28 | with `require_quality_inspection` on, may gate completion (untested) |
+| `project_id`, `design_file_id` | 0 | 12 each | no tools for Project or DesignFile |
+
+### Preferences (read over MCP, 2026-09-17)
+
+- **ManufacturingPreferences:** Suryodaya 1 record: `auto_create_job_cards` 1, `auto_consume_materials`
+  0, `allow_over_production` 0 (tolerance 10), `backflush_materials` 0, `require_quality_inspection` 1,
+  `auto_close_wo_on_completion` 1, costing `standard`. Keystone: no record.
+- **QualityPreferences:** Suryodaya 1 record: `auto_inspection_on_receive` 1,
+  `auto_inspection_on_complete` 1, `require_inspector_approval` 0, sampling `100_percent`,
+  `reject_action` `hold`, `track_non_conformances` 1. Keystone: no record.
+- Our seat has create and update on both (so they are shared settings we must not change). Whether the
+  server enforces them on transitions is untested.
+
 ## What "late" and "downstream" mean in the data
 
 - **Late (observed for submitted orders; inferred for drafts):** a submitted work order
@@ -140,9 +221,11 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
 - **Blocks downstream (inferred):**
   - `WorkOrder.sales_order_id` → SalesOrder `delivery_date` / `expected_shipment_date` (65 of 123
     Suryodaya work orders; 12 of 28 on Keystone, where SalesOrder is not readable, so escalate).
-  - Sub-assemblies: there is no work-order-to-work-order link. A work order blocks another when
-    it makes an item that appears in the other's BOM `materials`. On Suryodaya, 62 open work orders
-    make an item that is a material in some BOM. `BOM.parent_bom_id` is never set.
+  - Sub-assemblies: there is no direct work-order-to-work-order link, and the indirect batch path
+    is not usable (see [Links](#links)). A work order potentially supplies another when it makes
+    an item that appears in the other's BOM `materials`; that shows possible, not proven, dependency
+    (stock or another order could supply it). On Suryodaya, 62 open work orders make an item that is
+    a material in some BOM. `BOM.parent_bom_id` is never set.
   - `ProductionPlan.items[].sales_order_id` (plans are not linked from work orders today).
   - Batches and serial numbers link back to `work_order_id`. `genealogy` finds a batch's
     producing work order but cannot follow consumption downstream (see below).
