@@ -180,7 +180,7 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
   Suryodaya orders and `changeover_setup` for 1; all 7 on Keystone are
   `work_content_exceeds_due_date`. Most of those have negative `days_available` (the due date has
   passed), so the code restates "due date passed" rather than naming why. `causes[].downtime` and
-  `causes[].blocking` are always empty (already reported).
+  `causes[].blocking` are always empty (reported).
 - **Workstation load shows downtime we cannot read directly:** every workstation has
   `downtime_minutes` > 0 (up to about 2,400 on Suryodaya against 480 declared minutes a day), yet the
   workstations stay `ready` and the orders still finish today. Downtime does not seem to reduce
@@ -190,7 +190,8 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
   Changeovers are modelled on Suryodaya (83 setup-matrix rules; 1 of 85 item changes costed), not on
   Keystone (0 rules).
 - **Job-card data leaks through:** all 149 Suryodaya and 93 Keystone operations carry a
-  `job_card_id` and label, although `JobCard.list/.get` refuse (already reported).
+  `job_card_id` and label, although `JobCard.list/.get` refuse (reported, together with the
+  downtime minutes, on 2026-09-17).
 - **Use for the agent (inferred):** a quick list of late submitted orders with their operations
   and workstations. It is not evidence of cause and gives no new dates. Verify against
   `WorkOrder.get` before acting.
@@ -223,8 +224,6 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
 
 - Look at a few late work orders in the UI to confirm which date the business treats as "late".
 - Decide whether `check_stock_availability` is safe to call (POST, not marked read-only).
-- Decide whether downtime and job-card data visible through `finite_schedule` but refused by the
-  entity tools is worth adding to the row-scope reports.
 - Agree as a team before any write test, e.g. `WorkOrder.update` on dates for a `draft`,
   `in_progress` or `stopped` work order the team created.
 - Check `GET /api/bug-report/mine` for resolution notes before building around a refusal.
@@ -241,3 +240,4 @@ GitHub issue, as expected).
 | 2026-09-16 | Admin-only transitions are listed in tools/list for manufacturing_user |
 | 2026-09-16 | finite_schedule never attributes downtime or blocking to late orders |
 | 2026-09-17 | Follow-up to the JobCard/DowntimeEntry report: EngineeringChangeOrder is unreadable too |
+| 2026-09-17 | finite_schedule exposes downtime and job-card data that the entity tools refuse (follow-up to the row-scope and job-card-id reports) |
