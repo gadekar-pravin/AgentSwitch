@@ -16,6 +16,7 @@ The request our agent must handle:
 | --- | --- | --- |
 | Gap report (week one) | [docs/gap-report.md](docs/gap-report.md) | not started |
 | Domain notes | [docs/domain-notes.md](docs/domain-notes.md) | not started |
+| Competitor study (feeds the gap report) | [docs/competitor-study.md](docs/competitor-study.md) | plan agreed; study not started |
 | Agent (MCP client + loop) | _not created yet_ | after domain learning |
 | Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | _not created yet_ | after the agent |
 | Hand-written tests (team members only; AI-written tests score zero) | `tests/` (create when writing the first test) | none yet |

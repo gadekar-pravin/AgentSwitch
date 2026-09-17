@@ -8,6 +8,7 @@ tools, not impressions.
 - **Product:** _TBD_ (prefer an AI-native manufacturing / MES / production-planning product built in the last three years; ideally one that already ships an agent or MCP layer, as Rillet does for the Ledger example)
 - **Why this one:** _TBD_
 - **How we studied it:** trial account, demos, docs, changelog, pricing page — list what was actually used, with dates and links.
+  Plan and evidence log: [competitor-study.md](competitor-study.md).
 
 ## 1. What do they do that we do not?
 
