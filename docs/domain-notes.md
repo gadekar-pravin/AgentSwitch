@@ -59,6 +59,9 @@ tools marked `readOnlyHint: true`). Files in `/dumps/`:
   plus 35 `endpoint.*` tools.
 - No Warehouse, stock ledger, StockEntry, PurchaseOrder or Employee tools. Stock is visible only
   through `endpoint.manufacturing.check_stock_availability` (tested, see below).
+- No comment, history or version tools. WorkOrder's `commentable` and `trackable` are
+  `reserved_behaviors` in the schema, not active `behaviors`, and the UI shows no timeline on a work
+  order (observed 2026-09-17). There is no free-text "why late" source.
 
 Tools relevant to "late work order":
 
@@ -101,7 +104,7 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
 
 | Entity | Rows | Key fields | States and transitions | Notes |
 | --- | --- | --- | --- | --- |
-| WorkOrder | 123 / 28 | `item_id`*, `bom_id`, `sales_order_id`, `production_plan_id`, `qty`*, `produced_qty`, `planned_start_date`, `planned_end_date`, `actual_start_date`, `actual_end_date`, `priority`, `approval_status`, `status` | draft →Submit→ not_started →Start Production→ in_progress →Complete→ completed; in_progress ⇄ stopped (Stop / Resume); Cancel from any state (admin) | submittable (`docstatus` 0 in draft, 1 after). Dates are `date`, not datetime. |
+| WorkOrder | 123 / 28 | `item_id`*, `bom_id`, `sales_order_id`, `production_plan_id`, `qty`*, `produced_qty`, `planned_start_date`, `planned_end_date`, `actual_start_date`, `actual_end_date`, `priority`, `approval_status`, `status` | draft →Submit→ not_started →Start Production→ in_progress →Complete→ completed; in_progress ⇄ stopped (Stop / Resume); Cancel from every state except `cancelled` (admin) | submittable (`docstatus` 0 in draft, 1 after). Dates are `date`, not datetime. |
 | JobCard | refused | `work_order_id`*, `operation_id`, `workstation_id`, `employee_id`, `for_qty`, `completed_qty`, `planned_start/end`, `started_at`, `completed_at`, `time_in_mins`, `actual_time_in_mins`, `sequence`, `materials_consumed[]` | open →Start→ in_progress →Complete→ completed; Cancel (manufacturing_user) | The per-operation progress record. |
 | BOM | 100 / 11 | `item_id`*, `routing_id`, `is_subassembly`, `parent_bom_id`, `materials[]` (`item_id`, `qty`, `lead_time_days`, `is_critical`, `preferred_vendor_id`, `source_warehouse_id`), `operations[]` (`operation_id`, `workstation_id`, `time_in_mins`, `sequence`) | none (record) | Suryodaya: 26 sub-assembly BOMs, none with `parent_bom_id` set. |
 | Routing | 100 / 0 | `item_id`, `operations[]` (as BOM) | none | 63 Suryodaya BOMs link a routing. |
@@ -234,9 +237,11 @@ rule, not a flow guard (inferred).
   (reported, 2026-09-16). Cancel needs `admin`, so our seat cannot follow that advice. Unknown:
   whether `draft`, `in_progress` or `stopped` work orders accept date updates, and what capacity
   rule a new date must respect. `finite_schedule` does not propose new dates: it projects every
-  open order to finish today (see below). If most orders
-  cannot be re-dated, "reschedule what you can" may mostly mean: re-date drafts, `stop` / `resume`,
-  and escalate the rest with a proposed date (inferred).
+  open order to finish today (see below). The UI offers no way to edit dates in any state, drafts
+  included (see [UI walk](#ui-walk-observed-2026-09-17)). `stop` and `resume` change production state,
+  not dates, so they are not rescheduling. Until a date update is shown to work, "reschedule what you
+  can" means: re-date a draft if `WorkOrder.update` allows it (untested), and escalate the rest with a
+  proposed date (inferred).
 
 ## App endpoints (observed, 2026-09-17)
 
@@ -293,8 +298,9 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
 - **`lane_states`:** `WorkOrder`, `JobCard`, `Party` are `ready`; `StockEntry` and `StockLedger` are
   `permission_denied`.
 - **Result on one batch per tenant:** `upstream` = the producing WorkOrder. `downstream` and
-  `recipients` are empty, with 2 `unproven` hops (`documents_denied`, `ledger_denied`). Without stock
-  access, genealogy cannot show which later orders or customers consumed a lot.
+  `recipients` are empty, with 2 `unproven` hops (`documents_denied`, `ledger_denied`). For the two
+  batches tested, genealogy could not show which later orders or customers consumed the lot; empty
+  results with denied hops do not prove there are none. Other batches are untested.
 - **Use for the agent (inferred):** batch → producing work order only. Not a downstream tracer for
   our seat.
 
@@ -313,7 +319,8 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
   `is_critical`. The test order came back `critical` (2 of 3 materials with zero available).
 - **Verdict:** read-only as far as our seat can observe. Not proven: we cannot read the stock
   ledger or the audit log (`/api/audit-log` needs an administrator or auditor role), so a stock
-  reservation would be invisible. Safe for the agent to call; do not rely on it being idempotent.
+  reservation would be invisible. Reasonable for the agent to call on the evidence so far (one call);
+  do not rely on it being idempotent or side-effect free.
 - **Use for the agent (inferred):** the one direct material-shortage signal for "why is it late".
 
 ## UI walk (observed, 2026-09-17)
@@ -409,17 +416,37 @@ screenshots kept.
 
 ## Next checks
 
-- Agree as a team before any write test, e.g. `WorkOrder.update` on dates for a `draft`,
-  `in_progress` or `stopped` work order the team created. The draft date test in
-  [domain-learning-plan.md](domain-learning-plan.md) step 3 was skipped on 2026-09-17.
-- Check `GET /api/bug-report/mine` and the [live bug tracker](https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h)
-  for resolution notes before building around a refusal.
+Step 1 (learn the domain) is done; see [domain-learning-plan.md](domain-learning-plan.md). These are
+the known unknowns handed to the agent build. Each needs either a team-agreed check or an agent that
+handles both answers.
+
+- **Date updates.** `WorkOrder.update` on `draft`, `in_progress` or `stopped` is untested (the draft
+  test was skipped on 2026-09-17); on `not_started` it is refused. Until tested, the agent proposes a
+  date and escalates for any submitted order, and sends only the fields it means to change.
+- **Side effects of transitions.** What Start Production and Complete trigger (job cards, inspections,
+  auto close; Suryodaya preferences say all three are on) is untested. Cancel needs `admin`.
+- **Gates.** Whether `quality_inspection_required`, a draft or rejected inspection, or
+  `approval_status` blocks a transition is unknown.
+- **New dates have no capacity basis.** `finite_schedule` projects every order to finish today and
+  models no calendar or labour. Any proposed date is the agent's estimate and must say so.
+- **Downstream.** Confirmed: `sales_order_id` → SalesOrder (Suryodaya over MCP; Keystone needs
+  escalation). Potential only: another order whose BOM uses this order's item. No usable
+  order-to-order link.
+- **Refused cause data.** JobCard, DowntimeEntry and EngineeringChangeOrder stay refused. The agent
+  must say it cannot see job progress, downtime or change holds, and must not read an empty UI list as
+  "none".
+- **The book moves.** Re-read before any write and before reporting; counts in these notes are a
+  2026-09-17 snapshot.
+- **Bug status.** Before building around a refusal, check `GET /api/bug-report/mine` on both instances
+  and the [live bug tracker](https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h) for resolution notes.
 
 ## Bug reports filed
 
 Reports are stored per instance: `GET /api/bug-report/mine` on Suryodaya does not show reports
-filed on Keystone. Check both before filing. Listed 2026-09-17; all status `new`, stored locally
-(no GitHub issue, as expected).
+filed on Keystone. Check both before filing. Re-checked 2026-09-17 (step 4): 6 on Suryodaya, 2 on
+Keystone, all status `new`, no resolution notes, stored locally (no GitHub issue, as expected). The
+`not_started` update refusal and the admin-only cancel refusal are described in the "Admin-only
+transitions" report.
 
 Live tracker for bug reports and fixes: <https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h>.
 

@@ -8,7 +8,8 @@ logins.
 Status (2026-09-17): plan drafted and advisor-reviewed. Step 1 done by Claude in Chrome, look-only;
 findings in [domain-notes.md](domain-notes.md#ui-walk-observed-2026-09-17). Step 2 done; tables in
 [domain-notes.md](domain-notes.md#workorder-links-and-actions). Step 3 skipped by the user's decision.
-Step 4 not done.
+Step 4 done: bug reports re-checked, corrections below applied, and "Next checks" in domain-notes.md
+rewritten as the known unknowns for the agent build. Step 1 is complete.
 
 ## Starting point
 
@@ -85,7 +86,7 @@ A teammate can take one real late work order and say, resting only on observed e
 
 Untested writes do not block finishing Step 1; they block claiming those actions work.
 
-## Known corrections to apply
+## Known corrections (applied 2026-09-17)
 
 - **Withdrawn after step 2:** this plan first said a readable work-order-to-work-order link exists
   through `SubcontractOrder.supplied_materials[].batch_id` → `Batch.work_order_id` (93 cross-order
