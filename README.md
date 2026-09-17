@@ -1,4 +1,4 @@
-2# AgentSwitch — Team 04, Production
+# AgentSwitch — Team 04, Production
 
 Capstone project for the EAG V3 Agentic AI course. We build an agent for the
 **Production** seat (app `manufacturing`: work orders, BOMs, routings, job
