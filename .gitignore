@@ -26,3 +26,7 @@ __pycache__/
 CLAUDE.local.md
 # Local symlink to CLAUDE.md so Codex reads the same team rules (ln -s CLAUDE.md AGENTS.md)
 AGENTS.md
+
+# Private visual explainer published as a claude.ai Artifact. Kept local so Codex and Claude can
+# edit it; not committed because the page is shared privately, not through this public repo.
+/explainer/
