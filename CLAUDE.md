@@ -6,8 +6,27 @@ kept out of git: each teammate places the course copy at the repo root. If it is
 rather than guessing requirements; [assignment-overview.md](assignment-overview.md) is a
 summary, not the source.
 
-Personal instructions belong in `CLAUDE.local.md` (gitignored, loaded after this file). Change this
-file only for rules the whole team agrees on.
+## Shared and personal instructions
+
+Claude Code loads these in order ([memory docs](https://code.claude.com/docs/en/memory.md)):
+
+| Order | File | Location | Shared? |
+| --- | --- | --- | --- |
+| 1 | `~/.claude/CLAUDE.md` | each person's home directory | No; applies to all of that person's projects |
+| 2 | `CLAUDE.md` (this file) | repo root, committed | Yes |
+| 3 | `CLAUDE.local.md` | repo root, gitignored | No; each teammate's own copy |
+
+- **This file** holds rules the whole team depends on: no AI-written tests, platform invariants,
+  harness rules, secrets. Change it only by a commit the team agrees on; pull before editing and keep
+  edits small.
+- **`CLAUDE.local.md`** holds personal, project-specific preferences, e.g. which part of the project
+  you own, a default tenant, reply style. It is never committed, so it cannot conflict.
+- **`~/.claude/CLAUDE.md`** holds personal habits for every project.
+- All three become context; a later file is not a guaranteed override. If `CLAUDE.local.md`
+  contradicts this file, follow this file and point out the conflict. Personal files should add
+  preferences, not relax team rules.
+- Other AI tools do not read these files (Codex reads `AGENTS.md`). A teammate using another tool
+  must give it the team rules, especially the no-AI-tests rule.
 
 ## Project
 
@@ -43,8 +62,8 @@ tests, explaining failures and proposing what a test should check (in prose) are
 - **The tool catalogue is seat-scoped and schemas are closed.** Use only tool names returned by
   `tools/list` and only the arguments in each tool's schema. Never guess a name or argument.
 - **The seat boundary looks different per door.** Over MCP, a tool the seat may not use is absent
-  from `tools/list`; it is never offered and then refused. Over REST and the UI, another app's data
-  returns `403`. Neither is a bug. Escalate (EA, admin, human); do not work around it.
+  from `tools/list`; it is never offered and then refused. Over REST, another app's data returns
+  `403`; the UI navigation does not show other apps. None of these is a bug. Escalate (EA, admin, human); do not work around it.
 - **The book is shared and changes underneath us.** Re-read a record immediately before writing.
   Writes that the task requires (e.g. rescheduling a late work order) are allowed within seat
   permissions and workflow rules. Never "tidy up", delete or bulk-edit data the task did not ask
