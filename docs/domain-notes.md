@@ -58,7 +58,7 @@ tools marked `readOnlyHint: true`). Files in `/dumps/`:
 - Entities by domain: core 26, agent 21, manufacturing 17, sales 2 (Item, SalesOrder), crm 1,
   plus 35 `endpoint.*` tools.
 - No Warehouse, stock ledger, StockEntry, PurchaseOrder or Employee tools. Stock is visible only
-  through `endpoint.manufacturing.check_stock_availability` (untested).
+  through `endpoint.manufacturing.check_stock_availability` (tested, see below).
 
 Tools relevant to "late work order":
 
@@ -67,7 +67,7 @@ Tools relevant to "late work order":
 | Read | `WorkOrder.list/.get`, `BOM.*`, `Routing.*`, `Operation.*`, `Workstation.*`, `MaterialRequest.*`, `SubcontractOrder.*`, `ProductionPlan.*`, `QualityInspection.*`, `Batch.*`, `SerialNumber.*`, `Item.*`, `SalesOrder.list/.get` (Suryodaya only) |
 | Listed but refused (see below) | `JobCard.*`, `DowntimeEntry.*`, `EngineeringChangeOrder.*` |
 | Reschedule / state change | `WorkOrder.update` (planned dates, priority), `WorkOrder.submit`, `.start_production`, `.stop`, `.resume`, `.complete`; five `WorkOrder.cancel.<from>.cancelled` |
-| App endpoints | `endpoint.manufacturing.finite_schedule` (GET, arg `horizon_days`), `.genealogy` (GET, arg `code`) — both called, see [App endpoints](#app-endpoints-observed-2026-09-17); `.check_stock_availability` (POST, args `work_order_id`, `bom_id`, `qty`; needs only `WorkOrder.read` but is not marked read-only), `.generate_production_plan`, `.create_work_orders_from_plan`, `.create_material_requests`, `.work_instructions.acknowledge` (the rest untested) |
+| App endpoints | `endpoint.manufacturing.finite_schedule` (GET, arg `horizon_days`), `.genealogy` (GET, arg `code`) and `.check_stock_availability` (POST, args `work_order_id`, `bom_id`, `qty`) — all three called, see [App endpoints](#app-endpoints-observed-2026-09-17); `.generate_production_plan`, `.create_work_orders_from_plan`, `.create_material_requests`, `.work_instructions.acknowledge` (the rest untested) |
 | Escalation | `endpoint.agent_governance.escalations.raise` / `.assignees` / `.update`, `AgentEscalation.*` |
 
 ### Listed tools that refuse (observed, both tenants)
@@ -127,7 +127,8 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
     those requests are past `required_by_date`).
   - Open SubcontractOrders linked to the work order (33 late Suryodaya work orders; 43 of those
     orders are past `expected_delivery_date`).
-  - BOM material `lead_time_days` and stock (via `check_stock_availability`, untested).
+  - Material shortage: `check_stock_availability` per work order (per-item `shortage`,
+    `overall_status`), plus BOM material `lead_time_days`.
   - Workstation status on the BOM or routing operations (no late work order hits an inactive
     workstation today).
   - Draft QualityInspection referencing the work order.
@@ -210,6 +211,24 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
 - **Use for the agent (inferred):** batch → producing work order only. Not a downstream tracer for
   our seat.
 
+### `check_stock_availability`
+
+- **Why it looked unsafe:** POST, `readOnlyHint: false`, no description in the tool or OpenAPI.
+- **Why it looked safe:** `readOnlyHint` simply follows the HTTP method for all 35 endpoint tools
+  (18 GET true, 17 POST false, including POST previews and verifies). Its permission gate is
+  `WorkOrder.read`; the endpoints that create records gate on `.create`.
+- **Guarded test (2026-09-17, Suryodaya, one call):** `{work_order_id}` of a draft work order team04
+  created. Snapshots of WorkOrder, MaterialRequest, ProductionPlan, SubcontractOrder, Batch,
+  SerialNumber, QualityInspection, Notification, AgentMemory and AgentMessage taken before and 3 s
+  after showed **no created, removed or changed rows**, and the target work order was unchanged.
+- **Output:** `structuredContent = {status: "ok", result: {overall_status, items[]}}`; each item has
+  `item_id`, `required`, `available`, `shortage`, `status` (`ok` / `partial` / `critical`) and
+  `is_critical`. The test order came back `critical` (2 of 3 materials with zero available).
+- **Verdict:** read-only as far as our seat can observe. Not proven: we cannot read the stock
+  ledger or the audit log (`/api/audit-log` needs an administrator or auditor role), so a stock
+  reservation would be invisible. Safe for the agent to call; do not rely on it being idempotent.
+- **Use for the agent (inferred):** the one direct material-shortage signal for "why is it late".
+
 ## Seat boundaries hit
 
 - Refused although listed: `JobCard.*`, `DowntimeEntry.*`, `EngineeringChangeOrder.*` (both
@@ -223,7 +242,6 @@ Called read-only on both tenants (GET, `readOnlyHint: true`). Raw results in
 ## Next checks
 
 - Look at a few late work orders in the UI to confirm which date the business treats as "late".
-- Decide whether `check_stock_availability` is safe to call (POST, not marked read-only).
 - Agree as a team before any write test, e.g. `WorkOrder.update` on dates for a `draft`,
   `in_progress` or `stopped` work order the team created.
 - Check `GET /api/bug-report/mine` for resolution notes before building around a refusal.
