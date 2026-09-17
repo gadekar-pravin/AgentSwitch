@@ -6,7 +6,8 @@ observed, on which tenant (Suryodaya or Keystone) and when. Keep raw dumps in
 names, not record ids, customer names or other live data.
 
 Labels: **observed** = seen in a response; **inferred** = our reading of schemas or data, not
-confirmed; **untested** = not called yet.
+confirmed; **reported** = found by a teammate and filed in a team bug report (see
+[Bug reports filed](#bug-reports-filed)), not re-run for these notes; **untested** = not called yet.
 
 ## Identity
 
@@ -66,17 +67,18 @@ Tools relevant to "late work order":
 | Read | `WorkOrder.list/.get`, `BOM.*`, `Routing.*`, `Operation.*`, `Workstation.*`, `MaterialRequest.*`, `SubcontractOrder.*`, `ProductionPlan.*`, `QualityInspection.*`, `Batch.*`, `SerialNumber.*`, `Item.*`, `SalesOrder.list/.get` (Suryodaya only) |
 | Listed but refused (see below) | `JobCard.*`, `DowntimeEntry.*`, `EngineeringChangeOrder.*` |
 | Reschedule / state change | `WorkOrder.update` (planned dates, priority), `WorkOrder.submit`, `.start_production`, `.stop`, `.resume`, `.complete`; five `WorkOrder.cancel.<from>.cancelled` |
-| App endpoints (untested) | `endpoint.manufacturing.finite_schedule` (GET, arg `horizon_days`), `.genealogy` (GET, arg `code`), `.check_stock_availability` (POST, args `work_order_id`, `bom_id`, `qty`; needs only `WorkOrder.read` but is not marked read-only), `.generate_production_plan`, `.create_work_orders_from_plan`, `.create_material_requests`, `.work_instructions.acknowledge` |
+| App endpoints | `endpoint.manufacturing.finite_schedule` (GET, arg `horizon_days`; called by the team, see below), `.genealogy` (GET, arg `code`), `.check_stock_availability` (POST, args `work_order_id`, `bom_id`, `qty`; needs only `WorkOrder.read` but is not marked read-only), `.generate_production_plan`, `.create_work_orders_from_plan`, `.create_material_requests`, `.work_instructions.acknowledge` (all untested except `finite_schedule`) |
 | Escalation | `endpoint.agent_governance.escalations.raise` / `.assignees` / `.update`, `AgentEscalation.*` |
 
 ### Listed tools that refuse (observed, both tenants)
 
 `JobCard.list`, `DowntimeEntry.list` and `EngineeringChangeOrder.list` appear in `tools/list` but
-return `-32001 Permission denied`, both with no arguments and with `limit` / `offset`. REST `GET /api/JobCard` returns `403`
-`row_scope_denied`. The schemas grant `manufacturing_user` read on all three, and they are
+return `-32001 Permission denied`, both with no arguments and with `limit` / `offset`. REST
+`GET /api/<Entity>` returns `403` `row_scope_denied` for all three (re-checked 2026-09-17). The schemas grant `manufacturing_user` read on all three, and they are
 manufacturing entities, not another app's data. §6 says a tool the seat may not use is absent,
-not refused, so this looks like a platform bug (a candidate report; not filed yet). It also removes
-the two most direct "why is it late" sources: job-card progress and downtime reasons.
+not refused, so this looks like a platform bug. Filed: JobCard and DowntimeEntry on 2026-09-16,
+EngineeringChangeOrder as a follow-up on 2026-09-17. It also removes the most direct "why is it
+late" sources: job-card progress, downtime reasons and engineering-change holds.
 
 ### Schema traps for an agent (observed in `inputSchema`)
 
@@ -88,8 +90,10 @@ the two most direct "why is it late" sources: job-card progress and downtime rea
 - `WorkOrder.update` exposes `status`, `produced_qty`, `actual_*` and costs, also with defaults.
   Filling defaults on update could reset real values; changing `status` by update might bypass
   the workflow (untested; do not try on live data without agreement).
-- Every WorkOrder cancel transition has flow role `admin`, yet the tools are listed for our
-  `manufacturing_user` seat. Expect a refusal (untested).
+- Admin-only transitions are listed for our `manufacturing_user` seat: WorkOrder cancel ×5,
+  MaterialRequest cancel ×2, ProductionPlan cancel ×2, SubcontractOrder cancel ×2 (11 tools). A
+  WorkOrder cancel returned `-32602 ... cannot perform transition 'Cancel' (requires 'admin')`
+  (reported, 2026-09-16). An agent must not offer these as options.
 
 ## Entities and workflow states
 
@@ -137,15 +141,23 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
   - `ProductionPlan.items[].sales_order_id` (plans are not linked from work orders today).
   - Batches and serial numbers link back to `work_order_id`; `genealogy` may trace this
     (untested).
-- **Reschedulable (inferred, untested):** `WorkOrder.update` with `planned_start_date` /
-  `planned_end_date` (and maybe `priority`), re-reading the record first. `stop` / `resume` change
-  state, not dates. Unknown: whether updates are allowed after submit (`docstatus` 1), whether
-  `finite_schedule` proposes dates, and what capacity rule a new date must respect.
+- **`finite_schedule` (reported, 2026-09-16):** with `horizon_days: 14` it lists late orders with
+  `causes[]`. On Suryodaya all 49 late orders had cause `work_content_exceeds_due_date` (one also
+  `changeover_setup`); `causes[].downtime` and `causes[].blocking` were never populated. It also
+  returns job-card ids, labels and workstations that `JobCard.get` reports as `Not found`. Useful as
+  a hint, not as proof of the cause.
+- **Reschedulable (mostly blocked; partly reported):** `WorkOrder.update` on a `not_started` work
+  order is refused: "Cannot modify WorkOrder in 'not_started' status… Cancel first to make changes"
+  (reported, 2026-09-16). Cancel needs `admin`, so our seat cannot follow that advice. Unknown:
+  whether `draft`, `in_progress` or `stopped` work orders accept date updates, whether
+  `finite_schedule` proposes dates, and what capacity rule a new date must respect. If most orders
+  cannot be re-dated, "reschedule what you can" may mostly mean: re-date drafts, `stop` / `resume`,
+  and escalate the rest with a proposed date (inferred).
 
 ## Seat boundaries hit
 
 - Refused although listed: `JobCard.*`, `DowntimeEntry.*`, `EngineeringChangeOrder.*` (both
-  tenants). Candidate bug report; otherwise escalate for the data.
+  tenants), and the 11 admin-only cancel transitions. Reported; until fixed, escalate for the data.
 - Absent on Keystone: `SalesOrder.*` (no `viewer` role). Tracing a work order to its sales order on
   Keystone needs an escalation.
 - Absent on both: stock, warehouse, purchasing and employee entities. Material availability beyond
@@ -156,5 +168,19 @@ From `/api/schemas`. Counts are rows on 2026-09-17 (Suryodaya / Keystone).
 - Look at a few late work orders in the UI to confirm which date the business treats as "late".
 - Call the untested read endpoints (`finite_schedule`, `genealogy`) and decide whether
   `check_stock_availability` is safe to call (it is POST and not marked read-only).
-- Agree as a team before any write test (`WorkOrder.update` on dates, a cancel as `manufacturing_user`).
-- Decide whether to file the listed-but-refused report (§10).
+- Agree as a team before any write test, e.g. `WorkOrder.update` on dates for a `draft`,
+  `in_progress` or `stopped` work order the team created.
+- Check `GET /api/bug-report/mine` for resolution notes before building around a refusal.
+
+## Bug reports filed
+
+From `GET /api/bug-report/mine` on Suryodaya, 2026-09-17. All status `new`, stored locally (no
+GitHub issue, as expected).
+
+| Filed | Title |
+| --- | --- |
+| 2026-09-16 | JobCard and DowntimeEntry are unreadable for manufacturing_user, though the schema grants read (both instances) |
+| 2026-09-16 | finite_schedule returns JobCard ids that JobCard.get reports as not found |
+| 2026-09-16 | Admin-only transitions are listed in tools/list for manufacturing_user |
+| 2026-09-16 | finite_schedule never attributes downtime or blocking to late orders |
+| 2026-09-17 | Follow-up to the JobCard/DowntimeEntry report: EngineeringChangeOrder is unreadable too |
