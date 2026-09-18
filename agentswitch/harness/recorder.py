@@ -178,9 +178,18 @@ class ScopedWriteTools(ReadOnlyTools):
             return False
         return parsed.isoformat() == value
 
-    def _refuse(self, name: str, arguments: dict[str, Any], message: str) -> None:
+    def _refuse(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        message: str,
+        *,
+        refusal_kind: str | None = None,
+    ) -> None:
         entry, started = self._entry("call_tool", name, arguments)
         entry["write"] = True
+        if refusal_kind is not None:
+            entry["refusal_kind"] = refusal_kind
         error = WriteNotAllowed(message)
         self._finish(entry, started, "refused_write")
         entry["error"] = str(error)
@@ -212,6 +221,29 @@ class ScopedWriteTools(ReadOnlyTools):
             self._refuse(name, call_arguments, "Write is outside the scoped draft date update")
 
         original_phase = self.phase
+        subject_dates: dict[str, Any] | None = None
+        if original_phase == "subject":
+            for call in reversed(self.calls):
+                observed = call.get("structuredContent")
+                if (
+                    call.get("phase") == "subject"
+                    and call.get("tool") == "WorkOrder.get"
+                    and call.get("arguments") == {"id": self.target_id}
+                    and call.get("outcome") == "ok"
+                    and isinstance(observed, dict)
+                ):
+                    subject_dates = {
+                        "planned_start_date": observed.get("planned_start_date"),
+                        "planned_end_date": observed.get("planned_end_date"),
+                    }
+                    break
+            if subject_dates is None:
+                self._refuse(
+                    name,
+                    call_arguments,
+                    "Subject must successfully read the target before updating it",
+                )
+
         self.phase = "write_guard" if original_phase == "subject" else original_phase
         try:
             try:
@@ -239,13 +271,17 @@ class ScopedWriteTools(ReadOnlyTools):
         )
         if not owned:
             self._refuse(name, call_arguments, "Guard read did not confirm an owned draft work order")
-        if self.allowed_current_date_states is not None and not any(
-            self.last_guard_dates == state for state in self.allowed_current_date_states
+        allowed_date_states = (
+            [subject_dates] if original_phase == "subject" else self.allowed_current_date_states
+        )
+        if allowed_date_states is not None and not any(
+            self.last_guard_dates == state for state in allowed_date_states
         ):
             self._refuse(
                 name,
                 call_arguments,
                 "Guard read found a planned date mismatch with the allowed current states",
+                refusal_kind="date_mismatch",
             )
 
         entry, started = self._entry("call_tool", name, call_arguments)

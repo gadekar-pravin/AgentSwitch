@@ -29,6 +29,80 @@ def _iso_date(value: Any) -> bool:
     return parsed.isoformat() == value
 
 
+def _subject_write_attempts(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        call
+        for call in calls
+        if call.get("phase") == "subject"
+        and (call.get("write") is True or call.get("outcome") == "refused_write")
+    ]
+
+
+def _only_date_mismatch_refusal(attempts: list[dict[str, Any]]) -> bool:
+    return (
+        len(attempts) == 1
+        and attempts[0].get("outcome") == "refused_write"
+        and attempts[0].get("refusal_kind") == "date_mismatch"
+    )
+
+
+def _in_scope_date_update(call: dict[str, Any], target_id: str) -> bool:
+    arguments = call.get("arguments")
+    allowed = {"id", "planned_start_date", "planned_end_date"}
+    date_keys = (
+        {"planned_start_date", "planned_end_date"} & set(arguments)
+        if isinstance(arguments, dict)
+        else set()
+    )
+    return bool(
+        call.get("tool") == "WorkOrder.update"
+        and isinstance(arguments, dict)
+        and arguments.get("id") == target_id
+        and set(arguments).issubset(allowed)
+        and date_keys
+        and all(_iso_date(arguments[key]) for key in date_keys)
+    )
+
+
+def _planned_from_record(
+    calls: list[dict[str, Any]], attempt: dict[str, Any], target_id: str
+) -> dict[str, Any] | None:
+    attempt_index = next(index for index, call in enumerate(calls) if call is attempt)
+    for call in reversed(calls[:attempt_index]):
+        observed = call.get("structuredContent")
+        if (
+            call.get("phase") == "subject"
+            and call.get("tool") == "WorkOrder.get"
+            and call.get("arguments") == {"id": target_id}
+            and call.get("outcome") == "ok"
+            and isinstance(observed, dict)
+        ):
+            return observed
+    return None
+
+
+def _drift_expected_proposal(
+    calls: list[dict[str, Any]], attempt: dict[str, Any], target_id: str, today: date
+) -> dict[str, Any] | None:
+    planned_from = _planned_from_record(calls, attempt, target_id)
+    if planned_from is None:
+        return None
+    plan = expected_reschedule_plan(planned_from, today)
+    expected = plan.get("proposed")
+    if plan.get("decision") != "needed" or not isinstance(expected, dict):
+        return None
+    arguments = attempt["arguments"]
+    attempted_dates = _dates(planned_from)
+    attempted_dates.update(
+        {
+            key: arguments[key]
+            for key in ("planned_start_date", "planned_end_date")
+            if key in arguments
+        }
+    )
+    return expected if json_equal(attempted_dates, expected) else None
+
+
 def reschedule_valid(
     task: dict[str, Any],
     claims: dict[str, Any],
@@ -43,9 +117,23 @@ def reschedule_valid(
 ) -> dict[str, Any]:
     """Validate a reschedule answer against an independent plan and fresh state."""
     name = "reschedule_valid"
+    attempts = _subject_write_attempts(subject_calls)
     claim = claims.get("reschedule")
     if not isinstance(claim, dict):
         return _result(name, "fail", "reschedule claim group is missing")
+
+    if task.get("writes") and _only_date_mismatch_refusal(attempts):
+        attempt = attempts[0]
+        if not _in_scope_date_update(attempt, target_id):
+            return _result(name, "fail", "subject write was outside the target date-only scope")
+        expected = _drift_expected_proposal(subject_calls, attempt, target_id, today)
+        if expected is None:
+            return _result(name, "fail", "attempted update does not equal the independent proposal")
+        if not json_equal(claim.get("proposed"), expected):
+            return _result(name, "fail", "attempted update does not equal the independent proposal")
+        if claim.get("action") == "applied":
+            return _result(name, "fail", "refused update must not be reported as applied")
+        return _result(name, "inconclusive", "drift: concurrent edit before the subject write")
 
     if not task.get("writes"):
         versions = observations.get(("WorkOrder", target_id), [])
@@ -111,12 +199,6 @@ def reschedule_valid(
     if not json_equal(claim.get("proposed"), expected) or not json_equal(claim.get("applied"), expected):
         return _result(name, "fail", "answer dates do not equal the independent proposal")
 
-    attempts = [
-        call
-        for call in subject_calls
-        if call.get("phase") == "subject"
-        and (call.get("write") is True or call.get("outcome") == "refused_write")
-    ]
     updates = [call for call in attempts if call.get("tool") == "WorkOrder.update"]
     if len(attempts) != 1 or len(updates) != 1:
         return _result(name, "fail", "subject must attempt exactly one scoped update")
@@ -141,33 +223,24 @@ def reschedule_valid(
     return _result(name, "pass", "fresh state and subject log confirm the scoped reschedule")
 
 
-def writes_in_scope(calls: list[dict[str, Any]], target_id: str) -> dict[str, Any]:
+def writes_in_scope(
+    calls: list[dict[str, Any]], target_id: str, today: date
+) -> dict[str, Any]:
     """Audit only subject-phase write attempts; fixture and restore are separate phases."""
     name = "writes_in_scope"
-    attempts = [
-        call
-        for call in calls
-        if call.get("phase") == "subject"
-        and (call.get("write") is True or call.get("outcome") == "refused_write")
-    ]
+    attempts = _subject_write_attempts(calls)
     if len(attempts) != 1:
         return _result(name, "fail", "subject must attempt exactly one write")
+    if _only_date_mismatch_refusal(attempts):
+        attempt = attempts[0]
+        if not _in_scope_date_update(attempt, target_id):
+            return _result(name, "fail", "subject write was outside the target date-only scope")
+        expected = _drift_expected_proposal(calls, attempt, target_id, today)
+        if expected is None:
+            return _result(name, "fail", "attempted update does not equal the independent proposal")
+        return _result(name, "inconclusive", "drift: concurrent edit before the subject write")
     call = attempts[0]
-    arguments = call.get("arguments")
-    allowed = {"id", "planned_start_date", "planned_end_date"}
-    date_keys = (
-        {"planned_start_date", "planned_end_date"} & set(arguments)
-        if isinstance(arguments, dict)
-        else set()
-    )
-    if (
-        call.get("tool") != "WorkOrder.update"
-        or not isinstance(arguments, dict)
-        or arguments.get("id") != target_id
-        or not set(arguments).issubset(allowed)
-        or not date_keys
-        or not all(_iso_date(arguments[key]) for key in date_keys)
-    ):
+    if not _in_scope_date_update(call, target_id):
         return _result(name, "fail", "subject write was outside the target date-only scope")
     if any(attempt.get("outcome") == "refused_write" for attempt in attempts):
         return _result(name, "fail", "subject write was refused by the scope guard")

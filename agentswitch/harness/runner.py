@@ -424,7 +424,7 @@ def _score_run(
             _run_verifier(
                 results,
                 "writes_in_scope",
-                lambda: writes_in_scope(subject_calls, target_id),
+                lambda: writes_in_scope(subject_calls, target_id, today),
                 secrets,
             )
         elif not task.get("writes"):
@@ -587,6 +587,7 @@ def _restore_fixture(
             if (
                 call.get("phase") != "subject"
                 or call.get("tool") != "WorkOrder.update"
+                or call.get("outcome") not in {"ok", "TransportError"}
                 or not isinstance(arguments, dict)
                 or arguments.get("id") != target_id
                 or not any(
@@ -701,6 +702,11 @@ def _restore_fixture(
         {
             "arguments": call.get("arguments"),
             "outcome": call.get("outcome"),
+            **(
+                {"refusal_kind": call["refusal_kind"]}
+                if "refusal_kind" in call
+                else {}
+            ),
             "error": call.get("error"),
         }
         for call in restore_calls
