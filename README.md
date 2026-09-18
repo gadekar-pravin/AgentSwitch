@@ -19,7 +19,8 @@ The request our agent must handle:
 | Domain notes | [docs/domain-notes.md](docs/domain-notes.md) | Step 1 done (2026-09-17): tools, refusals, UI walk, links and actions, known unknowns for the agent; Release 1 changes re-checked the same day |
 | Competitor study (feeds the gap report) | [docs/competitor-study.md](docs/competitor-study.md) | Carbon (source, docs) and Fulcrum (docs) studied; no hands-on trial or demo yet |
 | MCP client | [agentswitch/mcp_client.py](agentswitch/mcp_client.py) | done (2026-09-18); read-only live check on Suryodaya; no hand-written tests yet |
-| Agent (investigation steps + LLM loop) | _not created yet_ | next; LLM provider not chosen |
+| Investigation steps (read-only: lateness, cause candidates, downstream) | [agentswitch/investigate.py](agentswitch/investigate.py) | done (2026-09-18); read-only live checks on both tenants; no hand-written tests yet |
+| Agent (reschedule step + LLM loop) | _not created yet_ | next; LLM provider not chosen; date-update test pending |
 | Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | _not created yet_ | after the agent |
 | Hand-written tests (team members only; AI-written tests score zero) | `tests/` (create when writing the first test) | none yet |
 

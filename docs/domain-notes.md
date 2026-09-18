@@ -99,6 +99,14 @@ tools marked `readOnlyHint: true`). Files in `/dumps/`:
   `isError: false`. List tools return `structuredContent = {data, total, limit, offset}`.
   `limit: 1000` is honoured.
 - Permission denied comes back as JSON-RPC error `-32001` with `data.code: "permission_denied"`.
+- **`limit` defaults to 20 when omitted, and the server applies it** (observed 2026-09-18, `BOM.list`:
+  20 of 100 rows), unlike the status/date filter defaults, which it ignores. Always send `limit` and
+  page with `offset` until `total`; offset paging returned the same rows with no duplicates.
+- A `.get` with a nonexistent id returns JSON-RPC `-32602` "Not found." (observed 2026-09-18,
+  `WorkOrder.get`, `SalesOrder.get`), not an `isError` result.
+- Filters `work_order_id` (MaterialRequest, SubcontractOrder, JobCard, DowntimeEntry),
+  `reference_type` + `reference_id` (QualityInspection), `bom_id` and `status` (WorkOrder) are applied
+  server-side when sent (observed 2026-09-18 against full scans).
 - List rows carry `_display` / `_<field>_display` labels, `_permissions`, `docstatus`, `number`,
   audit fields, and child tables (BOM `materials` and `operations` are included in list results).
 
