@@ -500,10 +500,27 @@ def _prepare_fixture(
     if not safe:
         return {"status": "fixture_failed", "reason": "fixture_not_safely_restorable"}, fixture_path, None
     cleanup["write_attempted"] = True
+    cleanup["restore_required"] = True
+    tools.allowed_current_date_states = [
+        {
+            "planned_start_date": before["planned_start_date"],
+            "planned_end_date": before["planned_end_date"],
+        }
+    ]
     try:
         tools.call_tool("WorkOrder.update", mutation, allow_write=True)
+    except WriteNotAllowed as error:
+        cleanup["restore_required"] = False
+        if "date mismatch" in str(error).lower():
+            return {
+                "status": "fixture_failed",
+                "reason": "concurrent_edit_detected",
+            }, fixture_path, None
+        return {"status": "fixture_failed", "reason": type(error).__name__}, fixture_path, None
     except Exception as error:
         return {"status": "fixture_failed", "reason": type(error).__name__}, fixture_path, None
+    finally:
+        tools.allowed_current_date_states = None
     try:
         snapshot = tools.call_tool("WorkOrder.get", {"id": target_id}).structured
     except Exception as error:
@@ -529,6 +546,7 @@ def _restore_fixture(
     own_user_id: str,
     secrets: tuple[str, ...],
     write_attempted: bool,
+    restore_required: bool | None = None,
 ) -> dict[str, Any]:
     with fixture_path.open(encoding="utf-8") as stream:
         persisted = json.load(stream)
@@ -544,6 +562,8 @@ def _restore_fixture(
     }
     if not write_attempted:
         outcome.update({"status": "not_needed", "reason": "fixture_write_not_attempted"})
+    elif restore_required is False:
+        outcome.update({"status": "not_needed", "reason": "fixture_write_not_dispatched"})
     elif isinstance(before, dict):
         original_dates = {
             "planned_start_date": before.get("planned_start_date"),
@@ -764,6 +784,7 @@ def _run_tasks(
         fixture_cleanup: dict[str, Any] = {
             "fixture_path": None,
             "write_attempted": False,
+            "restore_required": False,
         }
         pre_action_snapshot: dict[str, Any] | None = None
         restore: dict[str, Any] | None = None
@@ -919,6 +940,7 @@ def _run_tasks(
                         own_user_id=own_user_id,
                         secrets=secrets,
                         write_attempted=fixture_cleanup.get("write_attempted") is True,
+                        restore_required=fixture_cleanup.get("restore_required") is True,
                     )
                 except BaseException as error:
                     restore = {"status": "restore_failed", "reason": type(error).__name__}

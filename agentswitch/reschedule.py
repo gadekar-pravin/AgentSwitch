@@ -11,6 +11,7 @@ from .mcp_client import (
     ToolError,
     ToolNotFound,
     ToolResult,
+    TransportError,
     WriteNotAllowed,
 )
 
@@ -234,8 +235,12 @@ def reschedule(
         observed = _record_from_result(call("WorkOrder.get", {"id": work_order_id}))
     except Exception:
         if write_error is not None:
-            notes.append("The update and confirmation read both failed; the write outcome is unknown.")
-            return result("write_failed", "outcome_unknown", record, proposed, basis=plan["basis"])
+            if isinstance(write_error, TransportError) and write_error.outcome_unknown:
+                notes.append("The update and confirmation read both failed; the write outcome is unknown.")
+                reason = "outcome_unknown"
+            else:
+                reason = type(write_error).__name__
+            return result("write_failed", reason, record, proposed, basis=plan["basis"])
         return result("mismatch", "confirmation_read_failed", record, proposed, basis=plan["basis"])
 
     applied = {
@@ -244,7 +249,8 @@ def reschedule(
     }
     dates_match = applied == proposed
     if write_error is not None:
-        if dates_match:
+        outcome_unknown = isinstance(write_error, TransportError) and write_error.outcome_unknown
+        if outcome_unknown and dates_match:
             notes.append("The write raised an error, but the confirmation read shows it was applied; outcome was uncertain.")
             return result("applied", None, record, proposed, applied=applied, basis=plan["basis"])
         return result("write_failed", type(write_error).__name__, record, proposed, basis=plan["basis"])
