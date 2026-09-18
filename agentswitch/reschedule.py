@@ -157,6 +157,7 @@ def reschedule(
     today: date,
     own_user_id: Any,
     causes: Any = None,
+    allow_write: bool = True,
 ) -> dict[str, Any]:
     """Re-read, plan, and conditionally reschedule one owned draft work order."""
     calls: list[dict[str, Any]] = []
@@ -220,6 +221,8 @@ def reschedule(
         or created_by != own_user_id
     ):
         return result("escalated", "not_own_record", record, proposed, basis=plan["basis"])
+    if not allow_write:
+        return result("escalated", "writes_disabled", record, proposed, basis=plan["basis"])
 
     arguments: dict[str, Any] = {"id": work_order_id}
     for field in ("planned_start_date", "planned_end_date"):

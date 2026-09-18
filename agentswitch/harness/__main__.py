@@ -26,6 +26,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the AgentSwitch evaluation harness")
     parser.add_argument("--tenant", required=True, choices=("suryodaya", "keystone"))
     parser.add_argument(
+        "--subject",
+        choices=("deterministic", "llm"),
+        default="deterministic",
+        help="subject implementation to evaluate",
+    )
+    parser.add_argument(
         "--task",
         action="append",
         choices=tuple(task["id"] for task in TASKS),
@@ -70,6 +76,7 @@ def main() -> int:
             task_ids=args.task,
             today=args.today,
             allow_draft_writes=args.allow_draft_writes,
+            subject=args.subject,
         )
     except HarnessConfigurationError as error:
         failures = _exception_failed_restores(error)

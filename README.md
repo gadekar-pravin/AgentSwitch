@@ -21,8 +21,8 @@ The request our agent must handle:
 | MCP client | [agentswitch/mcp_client.py](agentswitch/mcp_client.py) | done (2026-09-18); read-only live check on Suryodaya; no hand-written tests yet |
 | Investigation steps (read-only: lateness, cause candidates, downstream) | [agentswitch/investigate.py](agentswitch/investigate.py) | done (2026-09-18); read-only live checks on both tenants; no hand-written tests yet |
 | Reschedule step | [agentswitch/reschedule.py](agentswitch/reschedule.py) | done (2026-09-18); writes only a draft created by our login (planned dates only), escalates everything else with a proposed date; live write check on our own Suryodaya draft, restored |
-| Agent (LLM loop) | _not created yet_ | next; LLM provider not chosen |
-| Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | [agentswitch/harness/](agentswitch/harness/) | done (2026-09-18); scores the `investigate()` + `reschedule()` adapter until the LLM agent exists; 6/6 read-only tasks on both tenants, write task passed live on Suryodaya; no hand-written tests yet |
+| Agent (LLM loop) | [agentswitch/agent.py](agentswitch/agent.py), [agentswitch/llm_client.py](agentswitch/llm_client.py) | done (2026-09-18); model `z-ai/glm-5.3-flash` via OpenRouter; 4/4 of the tested read-only tasks on Suryodaya (one run); write task and Keystone not yet run with it; no hand-written tests yet |
+| Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | [agentswitch/harness/](agentswitch/harness/) | done (2026-09-18); scores the LLM agent (`--subject llm`) or the deterministic `investigate()` + `reschedule()` adapter (default); deterministic: 6/6 read-only tasks on both tenants, write task passed live on Suryodaya; no hand-written tests yet |
 | Hand-written tests (team members only; AI-written tests score zero) | `tests/` (create when writing the first test) | none yet |
 
 Order follows the brief: learn the domain, study a leading product, write the
@@ -71,9 +71,44 @@ Reading material on the live instance (login required): `$AS/docs`, `$AS/redoc`,
 Bug reports and fixes: [live tracker](https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h); the reports we filed are
 listed in [docs/domain-notes.md](docs/domain-notes.md#bug-reports-filed).
 
+## Agent
+
+The agent answers one request about one work order. The model chooses which records to read and
+whether to refuse, reschedule or finish. Code builds the scored answer (lateness, causes,
+downstream) from the records the model actually read, using the same rules as `investigate()`.
+
+- The model sees 14 read-only tools from the seat's `tools/list`, plus two local actions:
+  `reschedule_work_order` and `finish`. Each list tool offers only the filters that tool needs, and
+  code pages every list to its end.
+- The only write is `reschedule_work_order`, which runs `reschedule()`: planned dates on a draft
+  created by our login. From the command line it writes only with `--allow-draft-writes`.
+- If the answer misses a required read, the agent gets one repair message naming the exact calls
+  still needed. Reads still missing after that become unknowns in the answer.
+- Model calls go through OpenRouter with `data_collection: "deny"`. `OPENROUTER_API_KEY` and
+  `OPENROUTER_MODEL` are set in `.env`.
+- GLM is served by a third-party host (Parasail), not Z.ai. Live tenant data in tool results goes to
+  that host.
+
+```bash
+uv run python -m agentswitch.agent --tenant suryodaya --work-order <id>
+```
+
+Model comparison, 2026-09-18, Suryodaya, one run each. The four read-only tasks were two refusals,
+the completed order and the late order with causes:
+
+| Model | Passed | Late-order cost |
+| --- | --- | --- |
+| `z-ai/glm-5.3-flash` | 4/4 | $0.042 |
+| `deepseek/deepseek-v4.1-flash` | 4/4 | $0.061 |
+| `openai/gpt-5.6-luna` | 3/4 (fills every filter with placeholders) | $0.035 |
+
+`google/gemini-3.8-flash` passed 4/4 in an earlier run at $0.25 per late order and was dropped on
+cost.
+
 ## Harness
 
 ```bash
+uv run python -m agentswitch.harness --tenant suryodaya --subject llm   # the LLM agent
 uv run python -m agentswitch.harness --tenant suryodaya            # all tasks
 uv run python -m agentswitch.harness --tenant keystone --task refuse_not_found
 uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_draft --allow-draft-writes
@@ -96,8 +131,10 @@ uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_dr
   `not_applicable` (no matching target). `inconclusive` is never counted as a pass.
 - Outside that task the harness only calls read-only tools, and every task's write attempts are
   audited. It refuses to run if `runs/` is not git-ignored. It takes about 4 minutes per tenant.
-- The subject today is `investigate()` plus `reschedule()` behind an adapter; its outside-seat refusal is routing, not
-  model judgement, and the run summary says so.
+- The default subject is `investigate()` plus `reschedule()` behind an adapter. Its outside-seat
+  refusal is routing, not model judgement, and the run summary says so. With `--subject llm`, every
+  refusal is the model's own decision. The run record also keeps the model transcript, token usage
+  and cost, including for failed runs.
 
 Known scoring limits. These need the book to change during a run, or a list longer than one page.
 None has been seen on either tenant.

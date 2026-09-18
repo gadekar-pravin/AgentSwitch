@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from agentswitch import llm_client
 from agentswitch.mcp_client import McpClient, TransportError, WriteNotAllowed, _read_env_file, login
 
 from .recorder import (
@@ -18,7 +19,7 @@ from .recorder import (
     redact,
     write_exclusive,
 )
-from .subjects import SUBJECT_LABEL, investigate_subject
+from .subjects import SUBJECT_LABEL, investigate_subject, llm_subject
 from .tasks import TASKS, public_task, select_target, task_by_id
 from .verifiers import (
     FreshReader,
@@ -728,12 +729,17 @@ def _run_tasks(
     env_file: Path | None = None,
     runs_dir: Path | None = None,
     allow_draft_writes: bool = False,
+    subject: str = "deterministic",
 ) -> list[dict[str, Any]]:
     """Run selected tasks, persisting each run before independently scoring it."""
     normalized_tenant = tenant.strip().lower()
     if normalized_tenant not in VALID_TENANTS:
         choices = ", ".join(sorted(VALID_TENANTS))
         raise HarnessConfigurationError(f"Invalid tenant {tenant!r}; expected one of: {choices}")
+    if subject not in {"deterministic", "llm"}:
+        raise HarnessConfigurationError(
+            f"Invalid subject {subject!r}; expected one of: deterministic, llm"
+        )
     requested_ids = list(task_ids) if task_ids else [task["id"] for task in TASKS]
     if len(requested_ids) != len(set(requested_ids)):
         raise HarnessConfigurationError("Task ids must not be repeated")
@@ -746,12 +752,19 @@ def _run_tasks(
     output_dir = _prepare_runs_dir(repo_root, runs_dir)
     selected_env_file = repo_root / ".env" if env_file is None else env_file
     base_url, email, password = _settings(normalized_tenant, selected_env_file)
+    llm = None
+    if subject == "llm":
+        try:
+            llm = llm_client.from_env(str(selected_env_file))
+        except ValueError as error:
+            raise HarnessConfigurationError(str(error)) from None
+    subject_name = llm_subject.__name__ if subject == "llm" else investigate_subject.__name__
     try:
         token = login(base_url, email, password, transport=transport)
     except Exception as error:
         message = redact(str(error), (password,))
         raise HarnessLoginError(f"Login failed: {message}") from None
-    secrets = (token, password)
+    secrets = (token, password) + ((llm.redaction_secret(),) if llm is not None else ())
     password = ""
     run_today = today or date.today()
     git_metadata = _git_metadata(repo_root)
@@ -872,18 +885,38 @@ def _run_tasks(
                 tools.phase = "subject"
                 subject_started = time.perf_counter_ns()
                 try:
-                    subject_output = investigate_subject(
-                        tools,
-                        request=task["request"],
-                        request_kind=task["request_kind"],
-                        target_id=selection.get("target_id"),
-                        today=run_today,
-                        reschedule=task.get("reschedule", False),
-                        own_user_id=own_user_id,
-                    )
+                    if subject == "llm":
+                        assert llm is not None
+                        subject_output = llm_subject(
+                            tools,
+                            request=task["request"],
+                            request_kind=task["request_kind"],
+                            target_id=selection.get("target_id"),
+                            today=run_today,
+                            reschedule=task.get("reschedule", False),
+                            own_user_id=own_user_id,
+                            llm=llm,
+                        )
+                    else:
+                        subject_output = investigate_subject(
+                            tools,
+                            request=task["request"],
+                            request_kind=task["request_kind"],
+                            target_id=selection.get("target_id"),
+                            today=run_today,
+                            reschedule=task.get("reschedule", False),
+                            own_user_id=own_user_id,
+                        )
                     answer = subject_output.get("answer")
                     label = subject_output.get("label", SUBJECT_LABEL)
                 except Exception as error:
+                    if subject == "llm":
+                        partial_output = getattr(error, "subject_output", None)
+                        if isinstance(partial_output, dict):
+                            subject_output = partial_output
+                        partial_label = getattr(error, "subject_label", None)
+                        if isinstance(partial_label, str):
+                            label = partial_label
                     harness_errors.append(_error(error, secrets, phase="subject"))
                 subject_elapsed_ms = round(
                     (time.perf_counter_ns() - subject_started) / 1_000_000,
@@ -901,7 +934,10 @@ def _run_tasks(
                 "fixture": fixture,
                 "pre_action_snapshot": pre_action_snapshot,
                 "own_user_id": own_user_id,
-                "subject": {"name": "investigate_subject", "label": label},
+                "subject": {
+                    "name": subject_name,
+                    "label": label,
+                },
                 "request": task["request"],
                 "answer": answer,
                 "subject_output": subject_output,
@@ -999,7 +1035,10 @@ def _run_tasks(
                     for result in score_record["verifiers"]
                 ],
                 "subject_label": label,
-                "routed_refusal": task["request_kind"] != "work_order_lateness",
+                "routed_refusal": (
+                    subject == "deterministic"
+                    and task["request_kind"] != "work_order_lateness"
+                ),
                 "restore": restore,
                 "restore_failed": not _restore_succeeded(restore),
             }
@@ -1017,6 +1056,7 @@ def run_tasks(
     env_file: Path | None = None,
     runs_dir: Path | None = None,
     allow_draft_writes: bool = False,
+    subject: str = "deterministic",
 ) -> list[dict[str, Any]]:
     """Run selected tasks and attach all failed restores to any propagated exception."""
     failed_restores: list[dict[str, Any]] = []
@@ -1031,6 +1071,7 @@ def run_tasks(
             env_file=env_file,
             runs_dir=runs_dir,
             allow_draft_writes=allow_draft_writes,
+            subject=subject,
         )
     except BaseException as error:
         error.failed_restores = failed_restores
