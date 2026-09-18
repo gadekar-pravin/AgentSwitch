@@ -162,6 +162,12 @@ def validate_answer(answer: Any, target_id: str | None) -> Verdict:
         return _result(name, "fail", "invalid_answer: prose must be a string or null")
     claims = answer.get("claims")
     if outcome == "refused":
+        if work_order_id != target_id:
+            return _result(
+                name,
+                "fail",
+                "invalid_answer: refused answer does not reference the selected target",
+            )
         if claims is not None:
             return _result(name, "fail", "invalid_answer: refused answers must have null claims")
         return _result(name, "pass", "answer contract is valid")

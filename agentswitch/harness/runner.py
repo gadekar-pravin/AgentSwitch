@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from agentswitch.mcp_client import McpClient, _read_env_file, login
+from agentswitch.mcp_client import McpClient, TransportError, _read_env_file, login
 
 from .recorder import ReadOnlyTools, observations_from_calls, redact, write_exclusive
 from .subjects import SUBJECT_LABEL, investigate_subject
@@ -110,8 +110,13 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _error(error: Exception, secrets: tuple[str, ...]) -> dict[str, str]:
-    return {"type": type(error).__name__, "message": redact(str(error), secrets)}
+def _error(error: Exception, secrets: tuple[str, ...], *, phase: str) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "type": type(error).__name__,
+        "is_transport": isinstance(error, TransportError),
+        "message": redact(str(error), secrets),
+    }
 
 
 def _score_verdict(verifiers: list[dict[str, Any]]) -> str:
@@ -177,7 +182,31 @@ def _score_run(
     elif status == "selection_error":
         results.append(_simple_result("selection", "inconclusive", "selection_error"))
     elif run_record.get("harness_errors"):
-        results.append(_simple_result("subject_execution", "fail", "subject_error"))
+        subject_errors = [
+            error
+            for error in run_record["harness_errors"]
+            if error.get("phase") == "subject"
+        ]
+        subject_read_failed = any(
+            call.get("phase") == "subject"
+            and "outcome" in call
+            and call.get("outcome") not in {"ok", "refused_write"}
+            for call in subject_calls
+        )
+        if (
+            subject_errors
+            and all(error.get("is_transport") is True for error in subject_errors)
+            and subject_read_failed
+        ):
+            results.append(
+                _simple_result(
+                    "subject_execution",
+                    "inconclusive",
+                    "source_unavailable: subject read failed at transport level",
+                )
+            )
+        else:
+            results.append(_simple_result("subject_execution", "fail", "subject_error"))
     else:
         target_id = selection.get("target_id")
         contract_results: list[dict[str, Any]] = []
@@ -351,7 +380,7 @@ def run_tasks(
         stem = f"{task_started.strftime('%Y%m%dT%H%M%S%fZ')}_{normalized_tenant}_{task['id']}"
         client = McpClient(base_url, token, transport=transport)
         tools = ReadOnlyTools(client, phase="select")
-        harness_errors: list[dict[str, str]] = []
+        harness_errors: list[dict[str, Any]] = []
         subject_output: dict[str, Any] | None = None
         answer: dict[str, Any] | None = None
         label = SUBJECT_LABEL
@@ -367,7 +396,7 @@ def run_tasks(
                 "target_id": None,
                 "reason": type(error).__name__,
             }
-            harness_errors.append(_error(error, secrets))
+            harness_errors.append(_error(error, secrets, phase="selection"))
         if selection.get("status") == "selected":
             tools.phase = "subject"
             subject_started = time.perf_counter_ns()
@@ -382,7 +411,7 @@ def run_tasks(
                 answer = subject_output.get("answer")
                 label = subject_output.get("label", SUBJECT_LABEL)
             except Exception as error:
-                harness_errors.append(_error(error, secrets))
+                harness_errors.append(_error(error, secrets, phase="subject"))
             subject_elapsed_ms = round((time.perf_counter_ns() - subject_started) / 1_000_000, 3)
         else:
             subject_elapsed_ms = 0.0
