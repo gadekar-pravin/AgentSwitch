@@ -122,6 +122,7 @@ def _paged_list(
     records: list[dict[str, Any]] = []
     seen: set[Any] = set()
     totals: list[int] = []
+    first_total: int | None = None
     offset = 0
     while True:
         arguments = dict(filters)
@@ -140,6 +141,10 @@ def _paged_list(
         ):
             raise ProtocolError(f"{tool} returned an invalid list envelope")
         totals.append(total)
+        if first_total is None:
+            first_total = total
+        elif total != first_total:
+            return records, {"complete": False, "reason": "total_changed", "totals": totals}
         duplicate = False
         for row in page:
             identifier = row.get("id")
