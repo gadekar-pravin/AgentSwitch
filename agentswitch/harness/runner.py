@@ -533,6 +533,7 @@ def _restore_fixture(
     with fixture_path.open(encoding="utf-8") as stream:
         persisted = json.load(stream)
     before = persisted.get("pre_fixture") if isinstance(persisted, dict) else None
+    intended = persisted.get("intended_mutation") if isinstance(persisted, dict) else None
     start_index = len(tools.calls)
     tools.phase = "restore"
     outcome: dict[str, Any] = {
@@ -544,20 +545,74 @@ def _restore_fixture(
     if not write_attempted:
         outcome.update({"status": "not_needed", "reason": "fixture_write_not_attempted"})
     elif isinstance(before, dict):
+        original_dates = {
+            "planned_start_date": before.get("planned_start_date"),
+            "planned_end_date": before.get("planned_end_date"),
+        }
+        if isinstance(intended, dict):
+            fixture_dates = {
+                "planned_start_date": intended.get("planned_start_date"),
+                "planned_end_date": intended.get("planned_end_date"),
+            }
+        else:
+            fixture_dates = {
+                "planned_start_date": None,
+                "planned_end_date": None,
+            }
+        produced_states: list[dict[str, Any]] = [
+            {"source": "fixture_mutation", "dates": fixture_dates}
+        ]
+        for call in tools.calls[:start_index]:
+            arguments = call.get("arguments")
+            if (
+                call.get("phase") != "subject"
+                or call.get("tool") != "WorkOrder.update"
+                or not isinstance(arguments, dict)
+                or arguments.get("id") != target_id
+                or not any(
+                    field in arguments
+                    for field in ("planned_start_date", "planned_end_date")
+                )
+            ):
+                continue
+            dates = dict(fixture_dates)
+            for field in ("planned_start_date", "planned_end_date"):
+                if field in arguments:
+                    dates[field] = arguments[field]
+            produced_states.append(
+                {
+                    "source": "subject_update",
+                    "sequence": call.get("sequence"),
+                    "outcome": call.get("outcome"),
+                    "dates": dates,
+                }
+            )
+        outcome["compared_states"] = {
+            "original": original_dates,
+            "current": None,
+            "run_produced": produced_states,
+        }
         try:
             current = tools.call_tool("WorkOrder.get", {"id": target_id}).structured
         except Exception as error:
             outcome["reason"] = f"restore_read_failed:{type(error).__name__}"
         else:
-            original_dates = {
-                "planned_start_date": before.get("planned_start_date"),
-                "planned_end_date": before.get("planned_end_date"),
-            }
+            current_dates = (
+                {
+                    "planned_start_date": current.get("planned_start_date"),
+                    "planned_end_date": current.get("planned_end_date"),
+                }
+                if isinstance(current, dict)
+                else None
+            )
+            outcome["compared_states"]["current"] = current_dates
             already_original = isinstance(current, dict) and all(
                 current.get(field) == value for field, value in original_dates.items()
             )
             if already_original:
                 outcome.update({"status": "restored", "reason": "already_original"})
+            elif not any(current_dates == state["dates"] for state in produced_states):
+                outcome["reason"] = "concurrent_edit_detected"
             elif not all(_exact_iso_date(value) for value in original_dates.values()):
                 outcome["reason"] = "original_dates_not_restorable"
             else:

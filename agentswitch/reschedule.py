@@ -14,9 +14,21 @@ from .mcp_client import (
     WriteNotAllowed,
 )
 
-_BASIS = (
+_DRAFT_BASIS = (
     "Estimate keeps the original planned duration and starts no earlier than today; "
     "it has no capacity, progress, or material basis."
+)
+_ACTIVE_BASIS = (
+    "The planned start is kept because work has begun; the new end allows the full original "
+    "planned duration from today because progress is unknown, so it is an upper bound, not a "
+    "forecast; it has no capacity or material basis."
+)
+_INVALID_DATES_BASIS = (
+    "No reschedule estimate is available because the planned dates are missing or invalid; "
+    "it has no capacity, progress, or material basis."
+)
+_NO_PLAN_BASIS = (
+    "No reschedule estimate is available; it has no capacity, progress, or material basis."
 )
 _HANDLED_ERRORS = (InvalidParams, PermissionDenied, ToolNotFound, WriteNotAllowed, ToolError)
 
@@ -40,38 +52,56 @@ def plan_reschedule(work_order: dict[str, Any], *, today: date) -> dict[str, Any
             "action": "cannot_plan",
             "reason": "missing_or_unparseable_planned_dates",
             "proposed": None,
-            "basis": _BASIS,
+            "basis": _INVALID_DATES_BASIS,
         }
     if end < start:
         return {
             "action": "cannot_plan",
             "reason": "planned_end_before_start",
             "proposed": None,
-            "basis": _BASIS,
+            "basis": _INVALID_DATES_BASIS,
         }
 
     status = work_order.get("status")
     if status in {"completed", "cancelled"}:
-        return {"action": "not_needed", "reason": "terminal_status", "proposed": None, "basis": _BASIS}
+        return {
+            "action": "not_needed",
+            "reason": "terminal_status",
+            "proposed": None,
+            "basis": "No reschedule estimate is needed for a completed or cancelled work order.",
+        }
     duration = end - start
     proposed: dict[str, str] | None = None
+    basis: str
     if status in {"draft", "not_started"}:
+        basis = _DRAFT_BASIS
         if start < today or end < today:
             proposed = {
                 "planned_start_date": today.isoformat(),
                 "planned_end_date": (today + duration).isoformat(),
             }
     elif status in {"in_progress", "stopped"}:
+        basis = _ACTIVE_BASIS
         if end < today:
             proposed = {
                 "planned_start_date": start.isoformat(),
                 "planned_end_date": (today + duration).isoformat(),
             }
     else:
-        return {"action": "cannot_plan", "reason": "unknown_status", "proposed": None, "basis": _BASIS}
+        return {
+            "action": "cannot_plan",
+            "reason": "unknown_status",
+            "proposed": None,
+            "basis": _NO_PLAN_BASIS,
+        }
     if proposed is None:
-        return {"action": "not_needed", "reason": "planned_dates_not_past", "proposed": None, "basis": _BASIS}
-    return {"action": "needed", "reason": None, "proposed": proposed, "basis": _BASIS}
+        return {
+            "action": "not_needed",
+            "reason": "planned_dates_not_past",
+            "proposed": None,
+            "basis": "The planned dates are not past, so no reschedule estimate is needed.",
+        }
+    return {"action": "needed", "reason": None, "proposed": proposed, "basis": basis}
 
 
 def _record_from_result(result: ToolResult) -> dict[str, Any]:
@@ -149,6 +179,7 @@ def reschedule(
         proposed: dict[str, str] | None,
         *,
         applied: dict[str, str] | None = None,
+        basis: str = _NO_PLAN_BASIS,
     ) -> dict[str, Any]:
         return {
             "action": action,
@@ -156,7 +187,7 @@ def reschedule(
             "before": _before(record),
             "proposed": proposed,
             "applied": applied,
-            "basis": _BASIS,
+            "basis": basis,
             "notes": notes,
             "calls": calls,
         }
@@ -171,14 +202,14 @@ def reschedule(
     plan = plan_reschedule(record, today=today)
     proposed = plan["proposed"]
     if plan["action"] in {"not_needed", "cannot_plan"}:
-        return result(plan["action"], plan["reason"], record, proposed)
+        return result(plan["action"], plan["reason"], record, proposed, basis=plan["basis"])
     status = record.get("status")
     if status != "draft":
         notes.append(
             "not_started updates are refused by the server and cancellation requires an admin; "
             "in_progress and stopped are outside the agreed write scope."
         )
-        return result("escalated", "status_not_editable", record, proposed)
+        return result("escalated", "status_not_editable", record, proposed, basis=plan["basis"])
     created_by = record.get("created_by")
     if (
         not isinstance(own_user_id, str)
@@ -187,7 +218,7 @@ def reschedule(
         or not created_by
         or created_by != own_user_id
     ):
-        return result("escalated", "not_own_record", record, proposed)
+        return result("escalated", "not_own_record", record, proposed, basis=plan["basis"])
 
     arguments: dict[str, Any] = {"id": work_order_id}
     for field in ("planned_start_date", "planned_end_date"):
@@ -204,8 +235,8 @@ def reschedule(
     except Exception:
         if write_error is not None:
             notes.append("The update and confirmation read both failed; the write outcome is unknown.")
-            return result("write_failed", "outcome_unknown", record, proposed)
-        return result("mismatch", "confirmation_read_failed", record, proposed)
+            return result("write_failed", "outcome_unknown", record, proposed, basis=plan["basis"])
+        return result("mismatch", "confirmation_read_failed", record, proposed, basis=plan["basis"])
 
     applied = {
         "planned_start_date": observed.get("planned_start_date"),
@@ -215,11 +246,18 @@ def reschedule(
     if write_error is not None:
         if dates_match:
             notes.append("The write raised an error, but the confirmation read shows it was applied; outcome was uncertain.")
-            return result("applied", None, record, proposed, applied=applied)
-        return result("write_failed", type(write_error).__name__, record, proposed)
+            return result("applied", None, record, proposed, applied=applied, basis=plan["basis"])
+        return result("write_failed", type(write_error).__name__, record, proposed, basis=plan["basis"])
     if dates_match and observed.get("status") == "draft":
-        return result("applied", None, record, proposed, applied=applied)
-    return result("mismatch", "confirmation_mismatch", record, proposed, applied=applied)
+        return result("applied", None, record, proposed, applied=applied, basis=plan["basis"])
+    return result(
+        "mismatch",
+        "confirmation_mismatch",
+        record,
+        proposed,
+        applied=applied,
+        basis=plan["basis"],
+    )
 
 
 __all__ = ["plan_reschedule", "reschedule"]
