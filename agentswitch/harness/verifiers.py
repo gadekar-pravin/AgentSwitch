@@ -811,20 +811,43 @@ def expected_causes_present(
     today: date,
 ) -> Verdict:
     name = "expected_causes_present"
+    cause_entities = ("MaterialRequest", "SubcontractOrder", "JobCard")
     pairs: dict[tuple[str, Any, str], dict[str, Any]] = {}
+
+    def add_pair(
+        entity: str,
+        identifier: Any,
+        code: str,
+        source: str,
+        expected: dict[str, Any],
+    ) -> None:
+        pairs.setdefault(
+            (entity, identifier, code),
+            {"expected": expected, "source": source},
+        )
+
     for expected in selection.get("expected_causes", []):
         if isinstance(expected, dict):
-            pairs[(expected.get("entity"), expected.get("id"), expected.get("code"))] = expected
+            add_pair(
+                expected.get("entity"),
+                expected.get("id"),
+                expected.get("code"),
+                "selection",
+                expected,
+            )
     for (entity, identifier), versions in observations.items():
-        if entity not in {"MaterialRequest", "SubcontractOrder", "JobCard"}:
+        if entity not in cause_entities:
             continue
         for record in versions:
             if record.get("work_order_id") != target_id:
                 continue
             code = expected_observed_code(entity, record, today)
             if code is not None:
-                pairs.setdefault(
-                    (entity, identifier, code),
+                add_pair(
+                    entity,
+                    identifier,
+                    code,
+                    "observed",
                     {"entity": entity, "id": identifier, "code": code},
                 )
     claimed = {
@@ -833,8 +856,156 @@ def expected_causes_present(
         for reference in cause["evidence"]
     }
     findings: list[dict[str, Any]] = []
-    for key, expected in pairs.items():
+
+    for entity in cause_entities:
+        state, records = fresh.list(entity, {"work_order_id": target_id})
+        if state != "ok":
+            findings.append(
+                {
+                    "expected": {"entity": entity},
+                    "source": "fresh",
+                    "branch": f"fresh_list_{state}",
+                    "verdict": "inconclusive",
+                    "reason": f"fresh {entity} cause list was {state}",
+                }
+            )
+            continue
+        for record in records:
+            code = expected_observed_code(entity, record, today)
+            if code is not None:
+                add_pair(
+                    entity,
+                    record.get("id"),
+                    code,
+                    "fresh",
+                    {"entity": entity, "id": record.get("id"), "code": code},
+                )
+
+    target_key = ("WorkOrder", target_id, "work_order_stopped")
+    target_expected = {"entity": "WorkOrder", "id": target_id, "code": "work_order_stopped"}
+    target_versions = observations.get(("WorkOrder", target_id), [])
+    if target_versions:
+        stopped = [record.get("status") == "stopped" for record in target_versions]
+        if all(stopped):
+            omitted = target_key not in claimed
+            findings.append(
+                {
+                    "expected": target_expected,
+                    "source": "target",
+                    "branch": (
+                        "target_observed_stopped_omitted"
+                        if omitted
+                        else "target_observed_stopped_claimed"
+                    ),
+                    "verdict": "fail" if omitted else "pass",
+                    "reason": (
+                        "the observed stopped work order cause was omitted"
+                        if omitted
+                        else "the observed stopped work order cause was claimed"
+                    ),
+                }
+            )
+        elif any(stopped):
+            findings.append(
+                {
+                    "expected": target_expected,
+                    "source": "target",
+                    "branch": "target_observed_mixed",
+                    "verdict": "inconclusive",
+                    "reason": "drift: the target's stopped status changed during subject observation",
+                }
+            )
+    else:
+        target_state, target_record = fresh.get("WorkOrder", target_id)
+        if target_state != "ok":
+            findings.append(
+                {
+                    "expected": target_expected,
+                    "source": "target",
+                    "branch": "target_fresh_unavailable",
+                    "verdict": "inconclusive",
+                    "reason": "the unobserved target work order could not be freshly read",
+                }
+            )
+        elif target_record.get("status") == "stopped":
+            omitted = target_key not in claimed
+            findings.append(
+                {
+                    "expected": target_expected,
+                    "source": "target",
+                    "branch": (
+                        "target_fresh_stopped_omitted"
+                        if omitted
+                        else "target_fresh_stopped_claimed"
+                    ),
+                    "verdict": "fail" if omitted else "pass",
+                    "reason": (
+                        "the freshly observed stopped work order cause was omitted"
+                        if omitted
+                        else "the freshly observed stopped work order cause was claimed"
+                    ),
+                }
+            )
+
+    for key, pair in pairs.items():
         entity, identifier, code = key
+        expected = pair["expected"]
+        source = pair["source"]
+        if source == "fresh":
+            if key in claimed:
+                findings.append(
+                    {
+                        "expected": expected,
+                        "source": source,
+                        "branch": "fresh_claimed",
+                        "verdict": "pass",
+                        "reason": "fresh expected cause was claimed",
+                    }
+                )
+                continue
+            if observations.get((entity, identifier)):
+                findings.append(
+                    {
+                        "expected": expected,
+                        "source": source,
+                        "branch": "fresh_code_changed_since_observation",
+                        "verdict": "inconclusive",
+                        "reason": "drift: cause code changed after subject observation",
+                    }
+                )
+                continue
+            scan_state = _covering_scan_state(subject_calls, entity, target_id)
+            if scan_state == "complete":
+                findings.append(
+                    {
+                        "expected": expected,
+                        "source": source,
+                        "branch": "fresh_unclaimed_subject_scan_complete",
+                        "verdict": "inconclusive",
+                        "reason": "drift: a fresh expected cause was absent from a complete subject scan",
+                    }
+                )
+            elif scan_state == "unavailable":
+                findings.append(
+                    {
+                        "expected": expected,
+                        "source": source,
+                        "branch": "fresh_unclaimed_subject_read_unavailable",
+                        "verdict": "inconclusive",
+                        "reason": "subject_read_unavailable",
+                    }
+                )
+            else:
+                findings.append(
+                    {
+                        "expected": expected,
+                        "source": source,
+                        "branch": f"fresh_unclaimed_subject_scan_{scan_state}",
+                        "verdict": "fail",
+                        "reason": "a fresh expected cause was omitted without a covering scan",
+                    }
+                )
+            continue
         versions = observations.get((entity, identifier), [])
         predicate = _cause_predicate(code, entity, target_id, today, observations, fresh)
         if versions:
@@ -844,6 +1015,8 @@ def expected_causes_present(
                     findings.append(
                         {
                             "expected": expected,
+                            "source": source,
+                            "branch": "observed_omitted",
                             "verdict": "fail",
                             "reason": "an observed expected cause was omitted",
                         }
@@ -852,6 +1025,8 @@ def expected_causes_present(
                     findings.append(
                         {
                             "expected": expected,
+                            "source": source,
+                            "branch": "observed_claimed",
                             "verdict": "pass",
                             "reason": "observed expected cause was claimed",
                         }
@@ -860,6 +1035,8 @@ def expected_causes_present(
                 findings.append(
                     {
                         "expected": expected,
+                        "source": source,
+                        "branch": "observed_mixed",
                         "verdict": "inconclusive",
                         "reason": "drift: an expected cause changed during subject observation",
                     }
@@ -868,6 +1045,8 @@ def expected_causes_present(
                 findings.append(
                     {
                         "expected": expected,
+                        "source": source,
+                        "branch": "selection_no_longer_held",
                         "verdict": "inconclusive",
                         "reason": "drift: a selection-time cause no longer held during subject observation",
                     }
@@ -878,6 +1057,8 @@ def expected_causes_present(
             findings.append(
                 {
                     "expected": expected,
+                    "source": source,
+                    "branch": "selection_subject_scan_complete",
                     "verdict": "inconclusive",
                     "reason": "drift: a selection-time cause was absent from a complete subject scan",
                 }
@@ -887,6 +1068,8 @@ def expected_causes_present(
             findings.append(
                 {
                     "expected": expected,
+                    "source": source,
+                    "branch": "selection_subject_read_unavailable",
                     "verdict": "inconclusive",
                     "reason": "subject_read_unavailable",
                 }
@@ -896,6 +1079,8 @@ def expected_causes_present(
             findings.append(
                 {
                     "expected": expected,
+                    "source": source,
+                    "branch": "selection_subject_read_incomplete",
                     "verdict": "inconclusive",
                     "reason": "subject_read_incomplete",
                 }
@@ -911,6 +1096,8 @@ def expected_causes_present(
             findings.append(
                 {
                     "expected": expected,
+                    "source": source,
+                    "branch": "selection_fresh_read_unavailable",
                     "verdict": "inconclusive",
                     "reason": "drift: an unobserved expected cause could not be re-read",
                 }
@@ -921,6 +1108,8 @@ def expected_causes_present(
             findings.append(
                 {
                     "expected": expected,
+                    "source": source,
+                    "branch": "selection_unclaimed_without_scan",
                     "verdict": "fail",
                     "reason": "an expected cause was omitted without a covering scan",
                 }
@@ -929,6 +1118,8 @@ def expected_causes_present(
             findings.append(
                 {
                     "expected": expected,
+                    "source": source,
+                    "branch": "selection_fresh_drift",
                     "verdict": "inconclusive",
                     "reason": "drift: an unobserved expected cause changed",
                 }
@@ -937,6 +1128,8 @@ def expected_causes_present(
             findings.append(
                 {
                     "expected": expected,
+                    "source": source,
+                    "branch": "selection_accounted_for",
                     "verdict": "pass",
                     "reason": "unobserved expected cause is accounted for",
                 }

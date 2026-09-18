@@ -278,7 +278,7 @@ def _score_run(
                     lambda: causes_valid(claims, target_id, observations, fresh, today),
                     secrets,
                 )
-                if task["id"] == "late_with_cause" and not changed:
+                if task["expected"].get("is_late") is True and not changed:
                     _run_verifier(
                         results,
                         "expected_causes_present",
