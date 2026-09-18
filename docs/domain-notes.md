@@ -231,7 +231,7 @@ All transition tools take only `id` (no reason or date argument). "Schema role" 
 | From | Action (tool) | To | Schema role | Observed | UI (2026-09-17) |
 | --- | --- | --- | --- | --- | --- |
 | — | `WorkOrder.create` | draft | `manufacturing_user` (create) | team04 created drafts (2026-09-16) | New button |
-| draft | `WorkOrder.update` (dates, priority, …) | draft | write | untested (planned test skipped) | no Edit control |
+| draft | `WorkOrder.update` (dates, priority, …) | draft | write | worked (2026-09-18): `planned_end_date` only, on a team04-created draft; no other field changed; reverted | no Edit control |
 | draft | Submit (`WorkOrder.submit`) | not_started | `manufacturing_user` | worked: a team04-created order is `not_started`, updated by team04 on 2026-09-16 (inferred from audit fields) | Submit button |
 | not_started | `WorkOrder.update` | — | write | refused: "Cannot modify WorkOrder in 'not_started' status… Cancel first" (reported) | no Edit control |
 | not_started | Start Production (`.start_production`) | in_progress | `manufacturing_user` | untested; may create job cards (`auto_create_job_cards` on, Suryodaya) | button |
@@ -305,14 +305,29 @@ rule, not a flow guard (inferred).
 - **Reschedulable (mostly blocked; partly reported):** `WorkOrder.update` on a `not_started` work
   order is refused: "Cannot modify WorkOrder in 'not_started' status… Cancel first to make changes"
   (reported, 2026-09-16; not re-checked after Release 1). Cancel needs `admin`, so our seat cannot
-  follow that advice; since Release 1 our seat has no cancel tools. Unknown:
-  whether `draft`, `in_progress` or `stopped` work orders accept date updates, and what capacity
-  rule a new date must respect. `finite_schedule` does not propose new dates: it projects every
+  follow that advice; since Release 1 our seat has no cancel tools. A `draft` accepts a date update
+  (tested 2026-09-18, see [Date-update test](#date-update-test-2026-09-18)). Unknown: whether
+  `in_progress` or `stopped` work orders accept date updates, and what capacity rule a new date must
+  respect. `finite_schedule` does not propose new dates: it projects every
   open order to finish today (see below). The UI offers no way to edit dates in any state, drafts
   included (see [UI walk](#ui-walk-observed-2026-09-17)). `stop` and `resume` change production state,
   not dates, so they are not rescheduling. Until a date update is shown to work, "reschedule what you
-  can" means: re-date a draft if `WorkOrder.update` allows it (untested), and escalate the rest with a
-  proposed date (inferred).
+  can" means: re-date a draft with `WorkOrder.update`, and escalate the rest with a proposed date
+  (inferred).
+
+## Date-update test (2026-09-18)
+
+Approved by the user; Suryodaya; one work order.
+
+- **Target:** a `draft` work order created by our own login on 2026-09-16 (`created_by` matched
+  `/api/auth/me`, and status re-read as `draft` just before the write).
+- **Call:** `WorkOrder.update` with only `id` and `planned_end_date` (moved one day later).
+- **Result:** success. A re-read showed the new date, status still `draft`, and no other field changed
+  apart from the audit fields. A second call with the original date restored it, and a re-read
+  confirmed the restore.
+- **Not covered:** `in_progress` and `stopped` orders (none of them are ours), `planned_start_date`,
+  and whether a new date must respect any capacity or sales-order rule.
+- **Record:** before/after snapshots are in `dumps/` (gitignored).
 
 ## App endpoints (observed, 2026-09-17)
 
@@ -499,8 +514,8 @@ Step 1 (learn the domain) is done; see [domain-learning-plan.md](domain-learning
 the known unknowns handed to the agent build. Each needs either a team-agreed check or an agent that
 handles both answers.
 
-- **Date updates.** `WorkOrder.update` on `draft`, `in_progress` or `stopped` is untested (the draft
-  test was skipped on 2026-09-17); on `not_started` it is refused. Until tested, the agent proposes a
+- **Date updates.** `WorkOrder.update` on a `draft` works (2026-09-18); on `in_progress` or `stopped`
+  it is untested; on `not_started` it is refused. Until tested, the agent proposes a
   date and escalates for any submitted order, and sends only the fields it means to change.
 - **Side effects of transitions.** What Start Production and Complete trigger (job cards, inspections,
   auto close; Suryodaya preferences say all three are on) is untested. Our seat has no cancel tools

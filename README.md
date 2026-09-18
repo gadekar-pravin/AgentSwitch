@@ -20,8 +20,8 @@ The request our agent must handle:
 | Competitor study (feeds the gap report) | [docs/competitor-study.md](docs/competitor-study.md) | Carbon (source, docs) and Fulcrum (docs) studied; no hands-on trial or demo yet |
 | MCP client | [agentswitch/mcp_client.py](agentswitch/mcp_client.py) | done (2026-09-18); read-only live check on Suryodaya; no hand-written tests yet |
 | Investigation steps (read-only: lateness, cause candidates, downstream) | [agentswitch/investigate.py](agentswitch/investigate.py) | done (2026-09-18); read-only live checks on both tenants; no hand-written tests yet |
-| Agent (reschedule step + LLM loop) | _not created yet_ | next; LLM provider not chosen; date-update test pending |
-| Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | _not created yet_ | after the agent |
+| Agent (reschedule step + LLM loop) | _not created yet_ | next; LLM provider not chosen; a `draft` accepts a date update (tested 2026-09-18) |
+| Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | [agentswitch/harness/](agentswitch/harness/) | read-only skeleton done (2026-09-18); scores the `investigate()` adapter until the LLM agent exists; 6/6 on both tenants; no hand-written tests yet |
 | Hand-written tests (team members only; AI-written tests score zero) | `tests/` (create when writing the first test) | none yet |
 
 Order follows the brief: learn the domain, study a leading product, write the
@@ -69,6 +69,26 @@ Reading material on the live instance (login required): `$AS/docs`, `$AS/redoc`,
 
 Bug reports and fixes: [live tracker](https://claude.ai/artifact/6LvLawFFUXGoRHUQKbPg9h); the reports we filed are
 listed in [docs/domain-notes.md](docs/domain-notes.md#bug-reports-filed).
+
+## Harness
+
+```bash
+uv run python -m agentswitch.harness --tenant suryodaya            # all tasks
+uv run python -m agentswitch.harness --tenant keystone --task refuse_not_found
+```
+
+- Six tasks: three late work orders (oldest late, late with a sales order, late with an open
+  material request, subcontract order or job card), one completed order (must be answered "not
+  late"), and two refusals (a work order that does not exist; a stock-ledger request outside the
+  seat). Targets are picked from live data at run time, so no record ids are committed.
+- Each task writes `runs/<time>_<tenant>_<task>.json` first, then reads it back from disk and
+  writes `<same name>.score.json`. Verifiers re-read the platform over MCP; they never read prose.
+- Verdicts are `pass`, `fail`, `inconclusive` (the shared book changed, or a read failed) and
+  `not_applicable` (no matching target). `inconclusive` is never counted as a pass.
+- The harness only calls read-only tools and refuses to run if `runs/` is not git-ignored. It
+  takes about 4 minutes per tenant.
+- The subject today is `investigate()` behind an adapter; its outside-seat refusal is routing, not
+  model judgement, and the run summary says so.
 
 ## Checks
 
