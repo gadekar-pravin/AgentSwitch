@@ -12,8 +12,11 @@ dev = [
 ]
 
 [tool.uv]
-# No importable package yet. Add one when the agent code lands.
+# Not installed: `agentswitch/` is imported from the repo root (see pytest pythonpath below).
 package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 110
