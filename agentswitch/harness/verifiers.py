@@ -1531,6 +1531,15 @@ def downstream_complete(
                         "reason": f"subject_read_{bom_scan_state}",
                     }
                 )
+            elif all(state is True for state in states) and not bom_observed and bom_scan_state == "complete":
+                findings.append(
+                    {
+                        **candidate,
+                        "branch": "bom_matched_after_subject_observation",
+                        "verdict": "inconclusive",
+                        "reason": "drift: consumer BOM did not contain the target item when the subject read it",
+                    }
+                )
             elif all(state is True for state in states):
                 findings.append(
                     {
