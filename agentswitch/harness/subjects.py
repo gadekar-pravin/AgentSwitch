@@ -5,10 +5,11 @@ from typing import Any
 
 from agentswitch.investigate import investigate
 from agentswitch.mcp_client import TransportError
+from agentswitch.reschedule import reschedule as reschedule_work_order
 
 from .recorder import ReadOnlyTools
 
-SUBJECT_LABEL = "investigate() deterministic adapter; no LLM"
+SUBJECT_LABEL = "investigate() + scoped reschedule() deterministic adapter; no LLM"
 
 
 def _refusal(reason: str, target_id: str | None) -> dict[str, Any]:
@@ -32,7 +33,11 @@ def _project_evidence(reference: Any) -> dict[str, Any]:
     }
 
 
-def _project_answer(raw: dict[str, Any], target_id: str) -> dict[str, Any]:
+def _project_answer(
+    raw: dict[str, Any],
+    target_id: str,
+    reschedule_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     work_order = raw.get("work_order")
     lateness = raw.get("lateness")
     downstream = raw.get("downstream")
@@ -86,23 +91,29 @@ def _project_answer(raw: dict[str, Any], target_id: str) -> dict[str, Any]:
         "item_id",
         "bom_id",
     )
+    claims = {
+        "work_order": {field: work_order.get(field) for field in work_order_fields},
+        "lateness": {
+            "is_late": lateness.get("is_late"),
+            "days_late": lateness.get("days_late"),
+        },
+        "causes": projected_causes,
+        "downstream": {
+            "sales_order": projected_sales,
+            "potential_consumers": projected_consumers,
+        },
+        "unknowns": raw.get("unknowns"),
+    }
+    if reschedule_result is not None:
+        claims["reschedule"] = {
+            field: reschedule_result.get(field)
+            for field in ("action", "reason", "proposed", "applied", "basis", "notes")
+        }
     return {
         "outcome": "answered",
         "refusal_reason": None,
         "work_order_id": target_id,
-        "claims": {
-            "work_order": {field: work_order.get(field) for field in work_order_fields},
-            "lateness": {
-                "is_late": lateness.get("is_late"),
-                "days_late": lateness.get("days_late"),
-            },
-            "causes": projected_causes,
-            "downstream": {
-                "sales_order": projected_sales,
-                "potential_consumers": projected_consumers,
-            },
-            "unknowns": raw.get("unknowns"),
-        },
+        "claims": claims,
         "prose": None,
     }
 
@@ -114,6 +125,8 @@ def investigate_subject(
     request_kind: str,
     target_id: str | None,
     today: date,
+    reschedule: bool = False,
+    own_user_id: str | None = None,
 ) -> dict[str, Any]:
     """Project the deterministic investigation into the scored answer contract."""
     del request
@@ -139,7 +152,20 @@ def investigate_subject(
     if not raw.get("found"):
         reason = "not_found" if first_outcome == "not_found" else "source_unavailable"
         return {"answer": _refusal(reason, target_id), "label": SUBJECT_LABEL}
-    return {"answer": _project_answer(raw, target_id), "label": SUBJECT_LABEL}
+    reschedule_result = None
+    if reschedule:
+        reschedule_result = reschedule_work_order(
+            tools,
+            target_id,
+            today=today,
+            own_user_id=own_user_id,
+            causes=raw.get("causes"),
+        )
+    return {
+        "answer": _project_answer(raw, target_id, reschedule_result),
+        "label": SUBJECT_LABEL,
+        "reschedule": reschedule_result,
+    }
 
 
 __all__ = ["SUBJECT_LABEL", "investigate_subject"]

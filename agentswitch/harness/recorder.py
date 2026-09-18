@@ -5,6 +5,7 @@ import os
 import re
 import time
 from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -77,12 +78,36 @@ class ReadOnlyTools:
         entry["structuredContent"] = tool
         return tool
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> ToolResult:
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        allow_write: bool = False,
+    ) -> ToolResult:
         call_arguments = {} if arguments is None else dict(arguments)
         entry, started = self._entry("call_tool", name, call_arguments)
+        if allow_write:
+            entry["write"] = True
+            error = WriteNotAllowed("The read-only harness adapter refuses write-enabled calls")
+            self._finish(entry, started, "refused_write")
+            entry["error"] = str(error)
+            raise error
+        get_tool = getattr(self.client, "get_tool", None)
+        if callable(get_tool):
+            try:
+                tool = get_tool(name)
+            except Exception as error:
+                self._finish(entry, started, type(error).__name__)
+                entry["error"] = str(error)
+                raise
+            annotations = tool.get("annotations") if isinstance(tool, dict) else None
+            if not isinstance(annotations, dict) or annotations.get("readOnlyHint") is not True:
+                entry["write"] = True
         try:
             result = self.client.call_tool(name, call_arguments)
         except WriteNotAllowed as error:
+            entry["write"] = True
             self._finish(entry, started, "refused_write")
             entry["error"] = str(error)
             raise
@@ -123,6 +148,102 @@ class ReadOnlyTools:
         if identifier is None:
             return
         self.observations.setdefault((entity, identifier), []).append(record)
+
+
+class ScopedWriteTools(ReadOnlyTools):
+    """Permit only date updates to one owned draft, guarded by an immediate read."""
+
+    def __init__(
+        self,
+        client: McpClient,
+        *,
+        target_id: Any,
+        own_user_id: Any,
+        phase: str = "select",
+    ) -> None:
+        super().__init__(client, phase=phase)
+        self.target_id = target_id
+        self.own_user_id = own_user_id
+
+    @staticmethod
+    def _iso_date(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            return False
+        return parsed.isoformat() == value
+
+    def _refuse(self, name: str, arguments: dict[str, Any], message: str) -> None:
+        entry, started = self._entry("call_tool", name, arguments)
+        entry["write"] = True
+        error = WriteNotAllowed(message)
+        self._finish(entry, started, "refused_write")
+        entry["error"] = str(error)
+        raise error
+
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        allow_write: bool = False,
+    ) -> ToolResult:
+        call_arguments = {} if arguments is None else dict(arguments)
+        is_update = name == "WorkOrder.update"
+        if not allow_write and not is_update:
+            return super().call_tool(name, call_arguments)
+        if not allow_write:
+            self._refuse(name, call_arguments, "WorkOrder.update requires explicit write permission")
+        allowed_keys = {"id", "planned_start_date", "planned_end_date"}
+        date_keys = {"planned_start_date", "planned_end_date"} & call_arguments.keys()
+        valid_scope = (
+            is_update
+            and call_arguments.get("id") == self.target_id
+            and set(call_arguments).issubset(allowed_keys)
+            and bool(date_keys)
+            and all(self._iso_date(call_arguments[key]) for key in date_keys)
+        )
+        if not valid_scope:
+            self._refuse(name, call_arguments, "Write is outside the scoped draft date update")
+
+        original_phase = self.phase
+        self.phase = "write_guard" if original_phase == "subject" else original_phase
+        try:
+            try:
+                guard = super().call_tool("WorkOrder.get", {"id": self.target_id}).structured
+            except Exception:
+                guard = None
+        finally:
+            self.phase = original_phase
+        owned = (
+            isinstance(self.own_user_id, str)
+            and bool(self.own_user_id)
+            and isinstance(guard, dict)
+            and guard.get("status") == "draft"
+            and isinstance(guard.get("created_by"), str)
+            and bool(guard.get("created_by"))
+            and guard.get("created_by") == self.own_user_id
+        )
+        if not owned:
+            self._refuse(name, call_arguments, "Guard read did not confirm an owned draft work order")
+
+        entry, started = self._entry("call_tool", name, call_arguments)
+        entry["write"] = True
+        try:
+            result = self.client.call_tool(name, call_arguments, allow_write=True)
+        except WriteNotAllowed as error:
+            self._finish(entry, started, "refused_write")
+            entry["error"] = str(error)
+            raise
+        except Exception as error:
+            self._finish(entry, started, type(error).__name__)
+            entry["error"] = str(error)
+            raise
+        self._finish(entry, started, "ok")
+        entry["structuredContent"] = result.structured
+        return result
 
 
 def observations_from_calls(
@@ -231,6 +352,7 @@ def write_exclusive(
 
 __all__ = [
     "ReadOnlyTools",
+    "ScopedWriteTools",
     "observations_from_calls",
     "redact",
     "safe_json",

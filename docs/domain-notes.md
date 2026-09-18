@@ -325,9 +325,14 @@ Approved by the user; Suryodaya; one work order.
 - **Result:** success. A re-read showed the new date, status still `draft`, and no other field changed
   apart from the audit fields. A second call with the original date restored it, and a re-read
   confirmed the restore.
-- **Not covered:** `in_progress` and `stopped` orders (none of them are ours), `planned_start_date`,
-  and whether a new date must respect any capacity or sales-order rule.
-- **Record:** before/after snapshots are in `dumps/` (gitignored).
+- **Second probe (same day, user-approved scope "team-04 drafts only"):** on our oldest own draft,
+  `WorkOrder.update` with only `id`, `planned_start_date` and `planned_end_date`, both set in the
+  past (today −10 and today −3). Accepted. A re-read showed only those two fields and `updated_at`
+  changed; status stayed `draft`. Restored both dates; a re-read confirmed the restore, with only
+  `updated_at` changed from the original record.
+- **Not covered:** `in_progress` and `stopped` orders (none of them are ours), and whether a new date
+  must respect any capacity or sales-order rule.
+- **Record:** snapshots are in `dumps/` (gitignored).
 
 ## App endpoints (observed, 2026-09-17)
 

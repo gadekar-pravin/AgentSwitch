@@ -24,6 +24,7 @@ _UNKNOWN_TOOL_OUTCOME_WARNING = (
 )
 
 Transport = Callable[[str, bytes, dict[str, str], float], tuple[int, bytes]]
+GetTransport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
 
 
 class McpError(Exception):
@@ -143,6 +144,19 @@ def _default_transport(
         return error.code, error.read()
 
 
+def _default_get_transport(
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+) -> tuple[int, bytes]:
+    request = Request(url, headers=headers, method="GET")
+    try:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+            return response.status, response.read()
+    except HTTPError as error:
+        return error.code, error.read()
+
+
 def _safe_excerpt(body: bytes, sensitive_values: tuple[str, ...] = ()) -> str:
     text = body.decode("utf-8", errors="replace")
     for value in sensitive_values:
@@ -240,6 +254,45 @@ def login(
     return payload["token"]
 
 
+def get_current_user_id(
+    base_url: str,
+    token: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    transport: GetTransport | None = None,
+) -> str:
+    """Return the authenticated user's id from the REST identity endpoint."""
+    url = f"{base_url.rstrip('/')}/api/auth/me"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    try:
+        status, response_body = (transport or _default_get_transport)(url, headers, timeout)
+    except (URLError, TimeoutError, OSError, HTTPException) as error:
+        cause_type = type(error).__name__
+        raise TransportError(
+            f"Network failure ({cause_type}) while contacting the current-user endpoint",
+            cause_type=cause_type,
+        ) from None
+    if not isinstance(status, int) or not isinstance(response_body, bytes):
+        raise TransportError("GET transport must return an integer status and bytes body")
+    if status == 401:
+        raise AuthError("Current-user request was rejected with HTTP 401")
+    if status != 200:
+        excerpt = _safe_excerpt(response_body, (token,))
+        raise TransportError(
+            f"Unexpected HTTP status {status} from current-user endpoint; body excerpt: {excerpt}"
+        )
+    payload = _decode_json(response_body, status, (token,))
+    if not isinstance(payload, dict):
+        raise ProtocolError("Current-user response must be an object")
+    identifier = payload.get("id")
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise ProtocolError("Current-user response did not contain a non-empty string id")
+    return identifier
+
+
 class McpClient:
     """Synchronous MCP client that automatically initializes before tool methods."""
 
@@ -250,15 +303,26 @@ class McpClient:
         *,
         timeout: float = DEFAULT_TIMEOUT,
         transport: Transport | None = None,
+        get_transport: GetTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._token = token
         self.timeout = timeout
         self._transport = transport or _default_transport
+        self._get_transport = get_transport
         self._next_request_id = 1
         self._initialize_result: dict[str, Any] | None = None
         self._tools: list[dict[str, Any]] | None = None
         self._tools_by_name: dict[str, dict[str, Any]] | None = None
+
+    def current_user_id(self) -> str:
+        """Return the authenticated user's non-empty id."""
+        return get_current_user_id(
+            self.base_url,
+            self._token,
+            timeout=self.timeout,
+            transport=self._get_transport,
+        )
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(base_url={self.base_url!r})"
