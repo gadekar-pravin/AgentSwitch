@@ -758,7 +758,12 @@ def _list_scan_state(
 
 
 def _covering_scan_state(calls: list[dict[str, Any]], entity: str, target_id: str) -> str:
-    return _list_scan_state(calls, entity, [{}, {"work_order_id": target_id}])
+    linked_filter = (
+        {"reference_type": "WorkOrder", "reference_id": target_id}
+        if entity == "QualityInspection"
+        else {"work_order_id": target_id}
+    )
+    return _list_scan_state(calls, entity, [{}, linked_filter])
 
 
 def _scan_sequence_state(sequence: list[dict[str, Any]]) -> str:
@@ -811,8 +816,21 @@ def expected_causes_present(
     today: date,
 ) -> Verdict:
     name = "expected_causes_present"
-    cause_entities = ("MaterialRequest", "SubcontractOrder", "JobCard")
+    cause_entities = ("MaterialRequest", "SubcontractOrder", "JobCard", "QualityInspection")
     pairs: dict[tuple[str, Any, str], dict[str, Any]] = {}
+
+    def linked_to_target(entity: str, record: dict[str, Any]) -> bool:
+        if entity == "QualityInspection":
+            return (
+                record.get("reference_type") == "WorkOrder"
+                and record.get("reference_id") == target_id
+            )
+        return record.get("work_order_id") == target_id
+
+    def list_filter(entity: str) -> dict[str, Any]:
+        if entity == "QualityInspection":
+            return {"reference_type": "WorkOrder", "reference_id": target_id}
+        return {"work_order_id": target_id}
 
     def add_pair(
         entity: str,
@@ -839,7 +857,7 @@ def expected_causes_present(
         if entity not in cause_entities:
             continue
         for record in versions:
-            if record.get("work_order_id") != target_id:
+            if not linked_to_target(entity, record):
                 continue
             code = expected_observed_code(entity, record, today)
             if code is not None:
@@ -858,7 +876,7 @@ def expected_causes_present(
     findings: list[dict[str, Any]] = []
 
     for entity in cause_entities:
-        state, records = fresh.list(entity, {"work_order_id": target_id})
+        state, records = fresh.list(entity, list_filter(entity))
         if state != "ok":
             findings.append(
                 {
@@ -871,6 +889,8 @@ def expected_causes_present(
             )
             continue
         for record in records:
+            if not linked_to_target(entity, record):
+                continue
             code = expected_observed_code(entity, record, today)
             if code is not None:
                 add_pair(

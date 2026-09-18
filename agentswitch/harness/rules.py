@@ -187,6 +187,12 @@ def expected_observed_code(entity: str, record: dict[str, Any], today: date) -> 
             return "subcontract_not_completed"
     if entity == "JobCard" and status in {"open", "in_progress"}:
         return "job_card_overdue" if overdue(record, entity, today) else None
+    if (
+        entity == "QualityInspection"
+        and status == "completed"
+        and record.get("overall_result") == "rejected"
+    ):
+        return "quality_rejected"
     return None
 
 
