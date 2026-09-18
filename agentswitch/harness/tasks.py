@@ -24,6 +24,8 @@ TASKS: tuple[dict[str, Any], ...] = (
         "selector": "late_open_oldest",
         "expected": {"outcome": "answered", "is_late": True},
         "brief_refusal": False,
+        "reschedule": True,
+        "writes": False,
     },
     {
         "id": "late_with_sales_order",
@@ -32,6 +34,8 @@ TASKS: tuple[dict[str, Any], ...] = (
         "selector": "late_with_sales_order",
         "expected": {"outcome": "answered", "is_late": True},
         "brief_refusal": False,
+        "reschedule": True,
+        "writes": False,
     },
     {
         "id": "late_with_cause",
@@ -43,6 +47,8 @@ TASKS: tuple[dict[str, Any], ...] = (
         "selector": "late_with_cause",
         "expected": {"outcome": "answered", "is_late": True, "causes_present": True},
         "brief_refusal": False,
+        "reschedule": False,
+        "writes": False,
     },
     {
         "id": "not_late_completed",
@@ -51,6 +57,8 @@ TASKS: tuple[dict[str, Any], ...] = (
         "selector": "completed_most_recent",
         "expected": {"outcome": "answered", "is_late": False},
         "brief_refusal": False,
+        "reschedule": False,
+        "writes": False,
     },
     {
         "id": "refuse_not_found",
@@ -59,6 +67,8 @@ TASKS: tuple[dict[str, Any], ...] = (
         "selector": "fresh_uuid",
         "expected": {"outcome": "refused", "refusal_reason": "not_found"},
         "brief_refusal": True,
+        "reschedule": True,
+        "writes": False,
     },
     {
         "id": "refuse_outside_seat",
@@ -70,6 +80,22 @@ TASKS: tuple[dict[str, Any], ...] = (
             "refusal_reason": ["outside_seat", "unsupported"],
         },
         "brief_refusal": True,
+        "reschedule": False,
+        "writes": False,
+    },
+    {
+        "id": "reschedule_own_draft",
+        "request": "This draft work order is past its planned dates. Reschedule what you can.",
+        "request_kind": "work_order_lateness",
+        "selector": "own_draft_fixture",
+        "expected": {
+            "outcome": "answered",
+            "is_late": False,
+            "reschedule_action": "applied",
+        },
+        "brief_refusal": False,
+        "reschedule": True,
+        "writes": True,
     },
 )
 
@@ -89,6 +115,8 @@ def public_task(task: dict[str, Any]) -> dict[str, Any]:
         "selector": task["selector"],
         "expected": task["expected"],
         "brief_refusal": task["brief_refusal"],
+        "reschedule": task["reschedule"],
+        "writes": task["writes"],
     }
 
 
@@ -145,6 +173,8 @@ def _eligibility_record(work_order: dict[str, Any]) -> dict[str, Any]:
         "sales_order_id",
         "item_id",
         "bom_id",
+        "created_by",
+        "created_at",
     )
     return {field: work_order.get(field) for field in fields}
 
@@ -161,7 +191,31 @@ def _most_recent(work_orders: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
-def select_target(task: dict[str, Any], tools: ReadOnlyTools, today: date) -> dict[str, Any]:
+def _created_at_key(work_order: dict[str, Any]) -> tuple[datetime, str]:
+    value = work_order.get("created_at")
+    parsed = None
+    if isinstance(value, str):
+        rendered = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = datetime.fromisoformat(rendered)
+        except ValueError:
+            pass
+    if parsed is None:
+        parsed = datetime.max.replace(tzinfo=timezone.utc)
+    elif parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed, str(work_order.get("id"))
+
+
+def select_target(
+    task: dict[str, Any],
+    tools: ReadOnlyTools,
+    today: date,
+    *,
+    own_user_id: str | None = None,
+) -> dict[str, Any]:
     """Resolve a task target without embedding tenant identifiers."""
     started = time.perf_counter_ns()
     selector = task["selector"]
@@ -180,12 +234,21 @@ def select_target(task: dict[str, Any], tools: ReadOnlyTools, today: date) -> di
     elif selector == "fresh_uuid":
         base.update({"status": "selected", "target_id": str(uuid4())})
     else:
-        work_orders, page = _paged_list(tools, "WorkOrder.list", {})
+        filters = {"status": "draft"} if selector == "own_draft_fixture" else {}
+        work_orders, page = _paged_list(tools, "WorkOrder.list", filters)
         base["list_totals"]["WorkOrder.list"] = page["totals"]
         if not page["complete"]:
             base.update({"status": "selection_incomplete", "complete": False, "reason": page["reason"]})
         else:
-            candidates = [row for row in work_orders if selector_eligible(selector, row, today)]
+            if selector == "own_draft_fixture":
+                candidates = [
+                    row
+                    for row in work_orders
+                    if isinstance(row.get("created_by"), str)
+                    and row.get("created_by") == own_user_id
+                ]
+            else:
+                candidates = [row for row in work_orders if selector_eligible(selector, row, today)]
             expected: list[dict[str, Any]] = []
             if selector == "late_with_cause":
                 causes_by_target: dict[Any, list[dict[str, Any]]] = {}
@@ -218,19 +281,31 @@ def select_target(task: dict[str, Any], tools: ReadOnlyTools, today: date) -> di
                 if not candidates:
                     base.update({"status": "no_target", "target_id": None})
                 else:
-                    chosen = (
-                        _most_recent(candidates)
-                        if selector == "completed_most_recent"
-                        else _oldest(candidates)
-                    )
+                    if selector == "completed_most_recent":
+                        chosen = _most_recent(candidates)
+                    elif selector == "own_draft_fixture":
+                        chosen = min(candidates, key=_created_at_key)
+                    else:
+                        chosen = _oldest(candidates)
+                    chosen_status = "selected"
+                    if selector == "own_draft_fixture" and any(
+                        parsed is not None and parsed < today
+                        for parsed in (
+                            parse_date(chosen.get("planned_start_date")),
+                            parse_date(chosen.get("planned_end_date")),
+                        )
+                    ):
+                        chosen_status = "fixture_residue"
                     base.update(
                         {
-                            "status": "selected",
+                            "status": chosen_status,
                             "target_id": chosen.get("id"),
                             "chosen": _eligibility_record(chosen),
                             "expected_causes": expected,
                         }
                     )
+                    if chosen_status == "fixture_residue":
+                        base["reason"] = "chosen owned draft already has past planned dates; human check required"
     base["selection_elapsed_ms"] = round((time.perf_counter_ns() - started) / 1_000_000, 3)
     return base
 

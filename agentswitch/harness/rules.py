@@ -83,6 +83,37 @@ def lateness(work_order: dict[str, Any], today: date) -> dict[str, bool | int | 
     return {"is_late": False, "days_late": None}
 
 
+def expected_reschedule_plan(work_order: dict[str, Any], today: date) -> dict[str, Any]:
+    """Independently derive the duration-preserving reschedule proposal."""
+    start = parse_date(work_order.get("planned_start_date"))
+    end = parse_date(work_order.get("planned_end_date"))
+    if start is None or end is None:
+        return {"decision": "cannot_plan", "proposed": None}
+    if end < start:
+        return {"decision": "cannot_plan", "proposed": None}
+    status = work_order.get("status")
+    if status in {"completed", "cancelled"}:
+        return {"decision": "not_needed", "proposed": None}
+    duration = end - start
+    if status in {"draft", "not_started"}:
+        needed = start < today or end < today
+        proposed_start = today
+    elif status in {"in_progress", "stopped"}:
+        needed = end < today
+        proposed_start = start
+    else:
+        return {"decision": "cannot_plan", "proposed": None}
+    if not needed:
+        return {"decision": "not_needed", "proposed": None}
+    return {
+        "decision": "needed",
+        "proposed": {
+            "planned_start_date": proposed_start.isoformat(),
+            "planned_end_date": (today + duration).isoformat(),
+        },
+    }
+
+
 def overdue(record: dict[str, Any], entity: str, today: date) -> bool:
     """Compute a cause's date-derived overdue value."""
     field = {
@@ -215,6 +246,7 @@ __all__ = [
     "POTENTIAL_CONSUMER_STATES",
     "REQUIRED_CAUSE_ENTITIES",
     "expected_observed_code",
+    "expected_reschedule_plan",
     "fields_match",
     "json_equal",
     "lateness",

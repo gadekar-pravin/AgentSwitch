@@ -15,8 +15,10 @@ from .mcp_client import (
     TransportError,
     WriteNotAllowed,
     from_env,
+    get_current_user_id,
     login,
 )
+from .reschedule import plan_reschedule, reschedule
 
 __all__ = [
     "ArgumentError",
@@ -33,5 +35,8 @@ __all__ = [
     "TransportError",
     "WriteNotAllowed",
     "from_env",
+    "get_current_user_id",
     "login",
+    "plan_reschedule",
+    "reschedule",
 ]

@@ -20,8 +20,9 @@ The request our agent must handle:
 | Competitor study (feeds the gap report) | [docs/competitor-study.md](docs/competitor-study.md) | Carbon (source, docs) and Fulcrum (docs) studied; no hands-on trial or demo yet |
 | MCP client | [agentswitch/mcp_client.py](agentswitch/mcp_client.py) | done (2026-09-18); read-only live check on Suryodaya; no hand-written tests yet |
 | Investigation steps (read-only: lateness, cause candidates, downstream) | [agentswitch/investigate.py](agentswitch/investigate.py) | done (2026-09-18); read-only live checks on both tenants; no hand-written tests yet |
-| Agent (reschedule step + LLM loop) | _not created yet_ | next; LLM provider not chosen; a `draft` accepts a date update (tested 2026-09-18) |
-| Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | [agentswitch/harness/](agentswitch/harness/) | read-only skeleton done (2026-09-18); scores the `investigate()` adapter until the LLM agent exists; 6/6 on both tenants; no hand-written tests yet |
+| Reschedule step | [agentswitch/reschedule.py](agentswitch/reschedule.py) | done (2026-09-18); writes only a draft created by our login (planned dates only), escalates everything else with a proposed date; live write check on our own Suryodaya draft, restored |
+| Agent (LLM loop) | _not created yet_ | next; LLM provider not chosen |
+| Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | [agentswitch/harness/](agentswitch/harness/) | done (2026-09-18); scores the `investigate()` + `reschedule()` adapter until the LLM agent exists; 6/6 read-only tasks on both tenants, write task passed live on Suryodaya; no hand-written tests yet |
 | Hand-written tests (team members only; AI-written tests score zero) | `tests/` (create when writing the first test) | none yet |
 
 Order follows the brief: learn the domain, study a leading product, write the
@@ -75,19 +76,27 @@ listed in [docs/domain-notes.md](docs/domain-notes.md#bug-reports-filed).
 ```bash
 uv run python -m agentswitch.harness --tenant suryodaya            # all tasks
 uv run python -m agentswitch.harness --tenant keystone --task refuse_not_found
+uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_draft --allow-draft-writes
 ```
 
 - Six tasks: three late work orders (oldest late, late with a sales order, late with an open
   material request, subcontract order or job card), one completed order (must be answered "not
   late"), and two refusals (a work order that does not exist; a stock-ledger request outside the
   seat). Targets are picked from live data at run time, so no record ids are committed.
+- A seventh task, `reschedule_own_draft`, checks the one write the agent may make: new planned
+  dates on a draft work order created by our own login. It runs only with `--allow-draft-writes`
+  and scores `not_applicable` otherwise. With the flag, the harness saves the draft to
+  `runs/<...>.fixture.json`, moves its dates into the past, lets the agent reschedule it, scores the
+  result by re-reading the record, then writes the original dates back and records that in
+  `runs/<...>.restore.json`. If the restore does not end with the original dates, it prints
+  `RESTORE FAILED` and exits 5: check that draft by hand. Run one write task at a time.
 - Each task writes `runs/<time>_<tenant>_<task>.json` first, then reads it back from disk and
   writes `<same name>.score.json`. Verifiers re-read the platform over MCP; they never read prose.
 - Verdicts are `pass`, `fail`, `inconclusive` (the shared book changed, or a read failed) and
   `not_applicable` (no matching target). `inconclusive` is never counted as a pass.
-- The harness only calls read-only tools and refuses to run if `runs/` is not git-ignored. It
-  takes about 4 minutes per tenant.
-- The subject today is `investigate()` behind an adapter; its outside-seat refusal is routing, not
+- Outside that task the harness only calls read-only tools, and every task's write attempts are
+  audited. It refuses to run if `runs/` is not git-ignored. It takes about 4 minutes per tenant.
+- The subject today is `investigate()` plus `reschedule()` behind an adapter; its outside-seat refusal is routing, not
   model judgement, and the run summary says so.
 
 ## Checks
