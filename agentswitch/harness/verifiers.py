@@ -89,6 +89,7 @@ class FreshReader:
             return self._lists[cache_key]
         rows: list[dict[str, Any]] = []
         seen: set[Any] = set()
+        first_total: int | None = None
         offset = 0
         while True:
             arguments = dict(filters)
@@ -109,6 +110,12 @@ class FreshReader:
                 or any(not isinstance(row, dict) for row in page)
             ):
                 outcome = ("incomplete", f"{entity}.list returned an invalid list envelope")
+                self._lists[cache_key] = outcome
+                return outcome
+            if first_total is None:
+                first_total = total
+            elif total != first_total:
+                outcome = ("incomplete", f"{entity}.list total changed between pages")
                 self._lists[cache_key] = outcome
                 return outcome
             for row in page:
@@ -727,8 +734,8 @@ def causes_valid(
 def _list_scan_state(
     calls: list[dict[str, Any]], entity: str, covering_filters: list[dict[str, Any]]
 ) -> str:
-    grouped: list[list[list[dict[str, Any]]]] = [[] for _ in covering_filters]
-    for call in calls:
+    grouped: list[list[tuple[list[dict[str, Any]], int]]] = [[] for _ in covering_filters]
+    for call_index, call in enumerate(calls):
         if call.get("phase") != "subject" or call.get("tool") != f"{entity}.list":
             continue
         arguments = call.get("arguments")
@@ -743,18 +750,18 @@ def _list_scan_state(
             continue
         group = grouped[filter_index]
         if arguments.get("offset") == 0 or not group:
-            group.append([])
-        group[-1].append(call)
+            group.append(([], call_index))
+        sequence, _ = group[-1]
+        sequence.append(call)
+        group[-1] = (sequence, call_index)
     sequences = [sequence for group in grouped for sequence in group]
     if not sequences:
         return "not_attempted"
 
-    states = [_scan_sequence_state(sequence) for sequence in sequences]
-    if "complete" in states:
+    states = [(_scan_sequence_state(sequence), last_call_index) for sequence, last_call_index in sequences]
+    if any(state == "complete" for state, _ in states):
         return "complete"
-    if "unavailable" in states:
-        return "unavailable"
-    return "incomplete"
+    return max(states, key=lambda item: item[1])[0]
 
 
 def _covering_scan_state(calls: list[dict[str, Any]], entity: str, target_id: str) -> str:
@@ -767,13 +774,14 @@ def _covering_scan_state(calls: list[dict[str, Any]], entity: str, target_id: st
 
 
 def _scan_sequence_state(sequence: list[dict[str, Any]]) -> str:
-    if any(call.get("outcome") != "ok" for call in sequence):
-        return "unavailable"
     seen: set[Any] = set()
     expected_offset = 0
-    last_total: int | None = None
+    first_total: int | None = None
+    last_call_failed = False
     for call in sequence:
-        arguments = call["arguments"]
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return "incomplete"
         limit = arguments.get("limit")
         offset = arguments.get("offset")
         if (
@@ -785,6 +793,10 @@ def _scan_sequence_state(sequence: list[dict[str, Any]]) -> str:
             or offset != expected_offset
         ):
             return "incomplete"
+        if call.get("outcome") != "ok":
+            last_call_failed = True
+            continue
+        last_call_failed = False
         structured = call.get("structuredContent")
         rows = structured.get("data") if isinstance(structured, dict) else None
         total = structured.get("total") if isinstance(structured, dict) else None
@@ -794,16 +806,21 @@ def _scan_sequence_state(sequence: list[dict[str, Any]]) -> str:
             or isinstance(total, bool)
             or total < 0
         ):
-            return "incomplete"
+            return "source_anomaly"
+        if first_total is None:
+            first_total = total
+        elif total != first_total:
+            return "source_anomaly"
         for row in rows:
             if not isinstance(row, dict) or row.get("id") is None or row["id"] in seen:
-                return "incomplete"
+                return "source_anomaly"
             seen.add(row["id"])
         expected_offset += len(rows)
-        last_total = total
         if len(seen) < total and not rows:
-            return "incomplete"
-    return "complete" if last_total is not None and len(seen) >= last_total else "incomplete"
+            return "source_anomaly"
+    if first_total is not None and len(seen) >= first_total:
+        return "complete"
+    return "unavailable" if last_call_failed else "incomplete"
 
 
 def expected_causes_present(
@@ -1015,6 +1032,16 @@ def expected_causes_present(
                         "reason": "subject_read_unavailable",
                     }
                 )
+            elif scan_state == "source_anomaly":
+                findings.append(
+                    {
+                        "expected": expected,
+                        "source": source,
+                        "branch": "fresh_unclaimed_subject_scan_source_anomaly",
+                        "verdict": "inconclusive",
+                        "reason": "subject_read_source_anomaly",
+                    }
+                )
             else:
                 findings.append(
                     {
@@ -1095,14 +1122,14 @@ def expected_causes_present(
                 }
             )
             continue
-        if scan_state == "incomplete":
+        if scan_state == "source_anomaly":
             findings.append(
                 {
                     "expected": expected,
                     "source": source,
-                    "branch": "selection_subject_read_incomplete",
+                    "branch": "selection_subject_read_source_anomaly",
                     "verdict": "inconclusive",
-                    "reason": "subject_read_incomplete",
+                    "reason": "subject_read_source_anomaly",
                 }
             )
             continue
@@ -1508,32 +1535,81 @@ def downstream_complete(
                     }
                 )
             else:
+                fresh_consumer = identifier in fresh_candidate_boms
                 findings.append(
                     {
                         **candidate,
-                        "branch": "observed_not_consumer",
-                        "verdict": "pass",
-                        "reason": "subject observations did not show a potential consumer",
+                        "branch": (
+                            "observed_not_consumer_fresh_consumer"
+                            if fresh_consumer
+                            else "observed_not_consumer"
+                        ),
+                        "verdict": "inconclusive" if fresh_consumer else "pass",
+                        "reason": (
+                            "drift: consumer became a potential consumer after subject observation"
+                            if fresh_consumer
+                            else "subject observations did not show a potential consumer"
+                        ),
                     }
                 )
             continue
 
         bom_ids = fresh_candidate_boms.get(identifier, set())
         bom_scan_state = _list_scan_state(subject_calls, "BOM", [{}])
-        work_order_scan_states = [
-            _list_scan_state(subject_calls, "WorkOrder", [{}, {"bom_id": bom_id}])
+        work_order_scan_states = {
+            bom_id: _list_scan_state(subject_calls, "WorkOrder", [{}, {"bom_id": bom_id}])
             for bom_id in bom_ids
-        ]
-        if bom_scan_state == "complete" and "complete" in work_order_scan_states:
+        }
+        if "complete" in work_order_scan_states.values():
             findings.append(
                 {
                     **candidate,
                     "branch": "appeared_after_complete_scan",
                     "verdict": "inconclusive",
-                    "reason": "drift: consumer appeared after complete subject scans",
+                    "reason": "drift: consumer appeared after a complete subject scan",
                 }
             )
-        elif bom_scan_state == "unavailable" or "unavailable" in work_order_scan_states:
+            continue
+
+        bom_observation_states = {
+            bom_id: [
+                _bom_contains_item(version, item_id)
+                for version in observations.get(("BOM", bom_id), [])
+            ]
+            for bom_id in bom_ids
+        }
+        mismatched_bom_ids = {
+            bom_id
+            for bom_id, matches in bom_observation_states.items()
+            if matches and not all(matches)
+        }
+        later_bom_ids = {
+            bom_id
+            for bom_id, matches in bom_observation_states.items()
+            if not matches and bom_scan_state == "complete"
+        }
+        if mismatched_bom_ids or later_bom_ids:
+            mixed_bom_ids = {
+                bom_id
+                for bom_id, matches in bom_observation_states.items()
+                if any(matches) and not all(matches)
+            }
+            findings.append(
+                {
+                    **candidate,
+                    "branch": (
+                        "observed_bom_drift"
+                        if mixed_bom_ids
+                        else "bom_matched_after_subject_observation"
+                    ),
+                    "verdict": "inconclusive",
+                    "reason": "drift: consumer BOM did not contain the target item when the subject read it",
+                }
+            )
+            continue
+
+        scan_states = {bom_scan_state, *work_order_scan_states.values()}
+        if "unavailable" in scan_states:
             findings.append(
                 {
                     **candidate,
@@ -1542,15 +1618,25 @@ def downstream_complete(
                     "reason": "subject_read_unavailable",
                 }
             )
-        else:
+            continue
+        if "source_anomaly" in scan_states:
             findings.append(
                 {
                     **candidate,
-                    "branch": "unobserved_without_complete_scan",
-                    "verdict": "fail",
-                    "reason": "a fresh potential consumer was omitted without complete subject scans",
+                    "branch": "subject_read_source_anomaly",
+                    "verdict": "inconclusive",
+                    "reason": "subject_read_source_anomaly",
                 }
             )
+            continue
+        findings.append(
+            {
+                **candidate,
+                "branch": "unobserved_without_complete_scan",
+                "verdict": "fail",
+                "reason": "a fresh potential consumer was omitted without complete subject scans",
+            }
+        )
     return _aggregate_findings(name, "all potential consumers are accounted for", findings)
 
 
