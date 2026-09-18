@@ -1491,6 +1491,7 @@ def downstream_complete(
                 fresh_candidate_boms.setdefault(identifier, set()).add(bom_id)
 
     claimed_ids = {consumer["id"] for consumer in claims["downstream"]["potential_consumers"]}
+    bom_scan_state = _list_scan_state(subject_calls, "BOM", [{}])
     for identifier in sorted(candidate_ids, key=str):
         candidate = {"id": identifier}
         if identifier in claimed_ids:
@@ -1516,7 +1517,21 @@ def downstream_complete(
                 )
                 for version in versions
             ]
-            if all(state is True for state in states):
+            bom_observed = any(observations.get(("BOM", version.get("bom_id"))) for version in versions)
+            if (
+                all(state is True for state in states)
+                and not bom_observed
+                and bom_scan_state in {"unavailable", "source_anomaly"}
+            ):
+                findings.append(
+                    {
+                        **candidate,
+                        "branch": f"subject_read_{bom_scan_state}",
+                        "verdict": "inconclusive",
+                        "reason": f"subject_read_{bom_scan_state}",
+                    }
+                )
+            elif all(state is True for state in states):
                 findings.append(
                     {
                         **candidate,
@@ -1555,7 +1570,6 @@ def downstream_complete(
             continue
 
         bom_ids = fresh_candidate_boms.get(identifier, set())
-        bom_scan_state = _list_scan_state(subject_calls, "BOM", [{}])
         work_order_scan_states = {
             bom_id: _list_scan_state(subject_calls, "WorkOrder", [{}, {"bom_id": bom_id}])
             for bom_id in bom_ids
