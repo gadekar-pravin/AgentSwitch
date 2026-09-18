@@ -17,6 +17,7 @@ from .verifiers import (
     FreshReader,
     answered_task_refusal,
     causes_valid,
+    downstream_complete,
     downstream_valid,
     expected_causes_present,
     lateness_correct,
@@ -273,6 +274,18 @@ def _score_run(
                         subject_calls,
                         fresh,
                         today,
+                    ),
+                    secrets,
+                )
+                _run_verifier(
+                    results,
+                    "downstream_complete",
+                    lambda: downstream_complete(
+                        claims,
+                        target_id,
+                        observations,
+                        subject_calls,
+                        fresh,
                     ),
                     secrets,
                 )

@@ -718,8 +718,10 @@ def causes_valid(
     return _aggregate_findings(name, "every claimed cause is valid", findings)
 
 
-def _covering_scan_state(calls: list[dict[str, Any]], entity: str, target_id: str) -> str:
-    grouped: dict[str, list[list[dict[str, Any]]]] = {"all": [], "target": []}
+def _list_scan_state(
+    calls: list[dict[str, Any]], entity: str, covering_filters: list[dict[str, Any]]
+) -> str:
+    grouped: list[list[list[dict[str, Any]]]] = [[] for _ in covering_filters]
     for call in calls:
         if call.get("phase") != "subject" or call.get("tool") != f"{entity}.list":
             continue
@@ -727,16 +729,17 @@ def _covering_scan_state(calls: list[dict[str, Any]], entity: str, target_id: st
         if not isinstance(arguments, dict):
             continue
         filters = {key: value for key, value in arguments.items() if key not in {"limit", "offset"}}
-        if filters == {}:
-            group = grouped["all"]
-        elif filters == {"work_order_id": target_id}:
-            group = grouped["target"]
-        else:
+        filter_index = next(
+            (index for index, candidate in enumerate(covering_filters) if json_equal(filters, candidate)),
+            None,
+        )
+        if filter_index is None:
             continue
+        group = grouped[filter_index]
         if arguments.get("offset") == 0 or not group:
             group.append([])
         group[-1].append(call)
-    sequences = [sequence for group in grouped.values() for sequence in group]
+    sequences = [sequence for group in grouped for sequence in group]
     if not sequences:
         return "not_attempted"
 
@@ -746,6 +749,10 @@ def _covering_scan_state(calls: list[dict[str, Any]], entity: str, target_id: st
     if "unavailable" in states:
         return "unavailable"
     return "incomplete"
+
+
+def _covering_scan_state(calls: list[dict[str, Any]], entity: str, target_id: str) -> str:
+    return _list_scan_state(calls, entity, [{}, {"work_order_id": target_id}])
 
 
 def _scan_sequence_state(sequence: list[dict[str, Any]]) -> str:
@@ -855,8 +862,8 @@ def expected_causes_present(
                 findings.append(
                     {
                         "expected": expected,
-                        "verdict": "pass",
-                        "reason": "expected cause no longer held in subject observations",
+                        "verdict": "inconclusive",
+                        "reason": "drift: a selection-time cause no longer held during subject observation",
                     }
                 )
             continue
@@ -1126,6 +1133,208 @@ def downstream_valid(
     return _aggregate_findings(name, "downstream claims match fresh linked records", findings)
 
 
+def _bom_contains_item(record: dict[str, Any], item_id: Any) -> bool:
+    materials = record.get("materials")
+    return isinstance(materials, list) and any(
+        isinstance(material, dict) and json_equal(material.get("item_id"), item_id)
+        for material in materials
+    )
+
+
+def _observed_consumer_state(
+    record: dict[str, Any],
+    target_id: str,
+    item_id: Any,
+    observations: dict[tuple[str, Any], list[dict[str, Any]]],
+    fresh_bom_state: str,
+    fresh_matching_bom_ids: set[Any],
+) -> bool | None:
+    if json_equal(record.get("id"), target_id) or record.get("status") not in POTENTIAL_CONSUMER_STATES:
+        return False
+    bom_id = record.get("bom_id")
+    bom_versions = observations.get(("BOM", bom_id), [])
+    if bom_versions:
+        matches = [_bom_contains_item(bom, item_id) for bom in bom_versions]
+        if all(matches):
+            return True
+        if any(matches):
+            return None
+        return False
+    if fresh_bom_state != "ok":
+        return None
+    return bom_id in fresh_matching_bom_ids
+
+
+def downstream_complete(
+    claims: dict[str, Any],
+    target_id: str,
+    observations: dict[tuple[str, Any], list[dict[str, Any]]],
+    subject_calls: list[dict[str, Any]],
+    fresh: FreshReader,
+) -> Verdict:
+    """Check potential-consumer completeness independently of the subject's answer."""
+    name = "downstream_complete"
+    target_versions = observations.get(("WorkOrder", target_id), [])
+    if target_versions:
+        item_id = target_versions[0].get("item_id")
+        if any(not json_equal(version.get("item_id"), item_id) for version in target_versions[1:]):
+            return _result(name, "inconclusive", "drift: target item changed during subject observation")
+    else:
+        target_state, target = fresh.get("WorkOrder", target_id)
+        if target_state != "ok":
+            return _result(name, "inconclusive", "target item is unavailable")
+        item_id = target.get("item_id")
+    if item_id is None:
+        return _result(name, "pass", "no item to consume", findings=[])
+
+    observed_matching_bom_ids = {
+        identifier
+        for (entity, identifier), versions in observations.items()
+        if entity == "BOM" and any(_bom_contains_item(version, item_id) for version in versions)
+    }
+    fresh_bom_state, fresh_boms = fresh.list("BOM", {})
+    fresh_matching_bom_ids: set[Any] = set()
+    findings: list[dict[str, Any]] = []
+    if fresh_bom_state == "ok":
+        fresh_matching_bom_ids = {
+            bom.get("id")
+            for bom in fresh_boms
+            if bom.get("id") is not None and _bom_contains_item(bom, item_id)
+        }
+    else:
+        findings.append(
+            {
+                "check": "fresh_bom_scan",
+                "branch": f"fresh_scan_{fresh_bom_state}",
+                "verdict": "inconclusive",
+                "reason": "fresh BOM scan was unavailable or incomplete",
+            }
+        )
+
+    matching_bom_ids = observed_matching_bom_ids | fresh_matching_bom_ids
+    candidate_ids: set[Any] = set()
+    for (entity, identifier), versions in observations.items():
+        if entity != "WorkOrder" or identifier == target_id:
+            continue
+        if any(version.get("bom_id") in matching_bom_ids for version in versions):
+            candidate_ids.add(identifier)
+
+    fresh_candidate_boms: dict[Any, set[Any]] = {}
+    for bom_id in fresh_matching_bom_ids:
+        work_order_state, work_orders = fresh.list("WorkOrder", {"bom_id": bom_id})
+        if work_order_state != "ok":
+            findings.append(
+                {
+                    "check": "fresh_work_order_scan",
+                    "bom_id": bom_id,
+                    "branch": f"fresh_scan_{work_order_state}",
+                    "verdict": "inconclusive",
+                    "reason": "fresh work-order scan was unavailable or incomplete",
+                }
+            )
+            continue
+        for work_order in work_orders:
+            identifier = work_order.get("id")
+            if (
+                identifier is not None
+                and not json_equal(identifier, target_id)
+                and work_order.get("status") in POTENTIAL_CONSUMER_STATES
+                and work_order.get("bom_id") == bom_id
+            ):
+                candidate_ids.add(identifier)
+                fresh_candidate_boms.setdefault(identifier, set()).add(bom_id)
+
+    claimed_ids = {consumer["id"] for consumer in claims["downstream"]["potential_consumers"]}
+    for identifier in sorted(candidate_ids, key=str):
+        candidate = {"id": identifier}
+        if identifier in claimed_ids:
+            findings.append(
+                {
+                    **candidate,
+                    "branch": "claimed",
+                    "verdict": "pass",
+                    "reason": "potential consumer was claimed",
+                }
+            )
+            continue
+        versions = observations.get(("WorkOrder", identifier), [])
+        if versions:
+            states = [
+                _observed_consumer_state(
+                    version,
+                    target_id,
+                    item_id,
+                    observations,
+                    fresh_bom_state,
+                    fresh_matching_bom_ids,
+                )
+                for version in versions
+            ]
+            if all(state is True for state in states):
+                findings.append(
+                    {
+                        **candidate,
+                        "branch": "observed_consumer_omitted",
+                        "verdict": "fail",
+                        "reason": "a subject-observed potential consumer was omitted",
+                    }
+                )
+            elif any(state is True for state in states) or any(state is None for state in states):
+                findings.append(
+                    {
+                        **candidate,
+                        "branch": "observed_consumer_drift",
+                        "verdict": "inconclusive",
+                        "reason": "drift: consumer status or BOM changed during observation",
+                    }
+                )
+            else:
+                findings.append(
+                    {
+                        **candidate,
+                        "branch": "observed_not_consumer",
+                        "verdict": "pass",
+                        "reason": "subject observations did not show a potential consumer",
+                    }
+                )
+            continue
+
+        bom_ids = fresh_candidate_boms.get(identifier, set())
+        bom_scan_state = _list_scan_state(subject_calls, "BOM", [{}])
+        work_order_scan_states = [
+            _list_scan_state(subject_calls, "WorkOrder", [{}, {"bom_id": bom_id}])
+            for bom_id in bom_ids
+        ]
+        if bom_scan_state == "complete" and "complete" in work_order_scan_states:
+            findings.append(
+                {
+                    **candidate,
+                    "branch": "appeared_after_complete_scan",
+                    "verdict": "inconclusive",
+                    "reason": "drift: consumer appeared after complete subject scans",
+                }
+            )
+        elif bom_scan_state == "unavailable" or "unavailable" in work_order_scan_states:
+            findings.append(
+                {
+                    **candidate,
+                    "branch": "subject_read_unavailable",
+                    "verdict": "inconclusive",
+                    "reason": "subject_read_unavailable",
+                }
+            )
+        else:
+            findings.append(
+                {
+                    **candidate,
+                    "branch": "unobserved_without_complete_scan",
+                    "verdict": "fail",
+                    "reason": "a fresh potential consumer was omitted without complete subject scans",
+                }
+            )
+    return _aggregate_findings(name, "all potential consumers are accounted for", findings)
+
+
 def refusal_valid(
     task: dict[str, Any],
     answer: dict[str, Any],
@@ -1186,6 +1395,7 @@ __all__ = [
     "FreshReader",
     "answered_task_refusal",
     "causes_valid",
+    "downstream_complete",
     "downstream_valid",
     "expected_causes_present",
     "lateness_correct",
