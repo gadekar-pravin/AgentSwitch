@@ -99,6 +99,19 @@ uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_dr
 - The subject today is `investigate()` plus `reschedule()` behind an adapter; its outside-seat refusal is routing, not
   model judgement, and the run summary says so.
 
+Known scoring limits. These need the book to change during a run, or a list longer than one page.
+None has been seen on either tenant.
+
+- A list longer than 1,000 rows is read in pages. If rows are added or removed between pages, the
+  harness does not notice, so target selection or a check can miss a row. Tenant lists are about
+  100 rows, so everything is read in one page.
+- If the platform returns an empty or duplicate page before the reported total, the harness
+  scores the subject's incomplete scan as `fail`, not `inconclusive`.
+- A work order that was closed when the subject read it, but open at verification, scores `pass`
+  when the answer leaves it out. The answer was right when the subject read the data.
+- If a BOM gains the target item between the subject's read and verification, an open work order on
+  that BOM scores `fail` when the answer leaves it out, although the subject could not have seen it.
+
 ## Checks
 
 ```bash
