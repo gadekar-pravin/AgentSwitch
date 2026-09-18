@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from agentswitch.mcp_client import McpClient, TransportError, _read_env_file, login
+from agentswitch.mcp_client import McpClient, TransportError, WriteNotAllowed, _read_env_file, login
 
 from .recorder import (
     ReadOnlyTools,
@@ -590,6 +590,7 @@ def _restore_fixture(
         outcome["compared_states"] = {
             "original": original_dates,
             "current": None,
+            "guard_read": None,
             "run_produced": produced_states,
         }
         try:
@@ -626,29 +627,46 @@ def _restore_fixture(
                     outcome["reason"] = "restore_guard_failed"
                 else:
                     outcome["reason"] = None
+                    date_mismatch_refused = False
+                    tools.allowed_current_date_states = [
+                        state["dates"] for state in produced_states
+                    ]
                     try:
                         tools.call_tool(
                             "WorkOrder.update",
                             {"id": target_id, **original_dates},
                             allow_write=True,
                         )
+                    except WriteNotAllowed as error:
+                        if "date mismatch" in str(error).lower():
+                            outcome["reason"] = "concurrent_edit_detected"
+                            date_mismatch_refused = True
+                        else:
+                            outcome["reason"] = f"restore_write_failed:{type(error).__name__}"
                     except Exception as error:
                         outcome["reason"] = f"restore_write_failed:{type(error).__name__}"
-                    try:
-                        confirmed = tools.call_tool("WorkOrder.get", {"id": target_id}).structured
-                    except Exception as error:
-                        outcome["reason"] = f"restore_confirmation_failed:{type(error).__name__}"
-                    else:
-                        restored = (
-                            isinstance(confirmed, dict)
-                            and confirmed.get("status") == "draft"
-                            and confirmed.get("created_by") == own_user_id
-                            and all(confirmed.get(field) == value for field, value in original_dates.items())
-                        )
-                        if restored:
-                            outcome.update({"status": "restored", "reason": None})
-                        elif not outcome.get("reason"):
-                            outcome["reason"] = "restore_confirmation_mismatch"
+                    finally:
+                        outcome["compared_states"]["guard_read"] = tools.last_guard_dates
+                        tools.allowed_current_date_states = None
+                    if not date_mismatch_refused:
+                        try:
+                            confirmed = tools.call_tool("WorkOrder.get", {"id": target_id}).structured
+                        except Exception as error:
+                            outcome["reason"] = f"restore_confirmation_failed:{type(error).__name__}"
+                        else:
+                            restored = (
+                                isinstance(confirmed, dict)
+                                and confirmed.get("status") == "draft"
+                                and confirmed.get("created_by") == own_user_id
+                                and all(
+                                    confirmed.get(field) == value
+                                    for field, value in original_dates.items()
+                                )
+                            )
+                            if restored:
+                                outcome.update({"status": "restored", "reason": None})
+                            elif not outcome.get("reason"):
+                                outcome["reason"] = "restore_confirmation_mismatch"
     restore_calls = tools.calls[start_index:]
     outcome["reads"] = [
         {

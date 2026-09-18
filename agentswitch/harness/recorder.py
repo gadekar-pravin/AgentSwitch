@@ -160,10 +160,13 @@ class ScopedWriteTools(ReadOnlyTools):
         target_id: Any,
         own_user_id: Any,
         phase: str = "select",
+        allowed_current_date_states: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(client, phase=phase)
         self.target_id = target_id
         self.own_user_id = own_user_id
+        self.allowed_current_date_states = allowed_current_date_states
+        self.last_guard_dates: dict[str, Any] | None = None
 
     @staticmethod
     def _iso_date(value: Any) -> bool:
@@ -217,6 +220,14 @@ class ScopedWriteTools(ReadOnlyTools):
                 guard = None
         finally:
             self.phase = original_phase
+        self.last_guard_dates = (
+            {
+                "planned_start_date": guard.get("planned_start_date"),
+                "planned_end_date": guard.get("planned_end_date"),
+            }
+            if isinstance(guard, dict)
+            else None
+        )
         owned = (
             isinstance(self.own_user_id, str)
             and bool(self.own_user_id)
@@ -228,6 +239,14 @@ class ScopedWriteTools(ReadOnlyTools):
         )
         if not owned:
             self._refuse(name, call_arguments, "Guard read did not confirm an owned draft work order")
+        if self.allowed_current_date_states is not None and not any(
+            self.last_guard_dates == state for state in self.allowed_current_date_states
+        ):
+            self._refuse(
+                name,
+                call_arguments,
+                "Guard read found a planned date mismatch with the allowed current states",
+            )
 
         entry, started = self._entry("call_tool", name, call_arguments)
         entry["write"] = True
