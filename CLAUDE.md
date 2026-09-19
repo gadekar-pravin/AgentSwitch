@@ -46,8 +46,8 @@ without asking. The instructor says the platform's own LLM will be integrated wi
 once the harness is ready (Release 1 note, 2026-09-17).
 
 Next: [docs/harness-architecture-plan.md](docs/harness-architecture-plan.md) ports the agent and
-harness to the S17Code architecture in phases. The team agreed it on 2026-09-19; phases 1 and 2
-are done. Follow the plan's phase order.
+harness to the S17Code architecture in phases. The team agreed it on 2026-09-19; phases 1, 2
+and 2b are done. Follow the plan's phase order.
 
 ## Commands
 

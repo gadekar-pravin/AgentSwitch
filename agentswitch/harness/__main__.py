@@ -14,7 +14,7 @@ from .runner import (
     HarnessPersistenceError,
     run_tasks,
 )
-from .tasks import TASKS
+from .tasks import TaskFileError, load_tasks
 
 
 def _date(value: str) -> date:
@@ -24,7 +24,7 @@ def _date(value: str) -> date:
         raise argparse.ArgumentTypeError("expected YYYY-MM-DD") from None
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(task_ids: tuple[str, ...]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the AgentSwitch evaluation harness")
     parser.add_argument("--tenant", required=True, choices=("suryodaya", "keystone"))
     parser.add_argument(
@@ -36,7 +36,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task",
         action="append",
-        choices=tuple(task["id"] for task in TASKS),
+        choices=task_ids,
         help="task to run; repeat for multiple tasks (default: all)",
     )
     parser.add_argument("--today", type=_date, default=date.today(), help="evaluation date (YYYY-MM-DD)")
@@ -77,10 +77,16 @@ def _report_failed_restores(failures: list[dict[str, Any]]) -> None:
 
 
 def main() -> int:
-    args = _parser().parse_args()
+    try:
+        tasks = load_tasks()
+    except TaskFileError as error:
+        print(f"configuration error: {error}")
+        return 2
+    args = _parser(tuple(task["id"] for task in tasks)).parse_args()
     try:
         summaries = run_tasks(
             args.tenant,
+            tasks=tasks,
             task_ids=args.task,
             today=args.today,
             allow_draft_writes=args.allow_draft_writes,

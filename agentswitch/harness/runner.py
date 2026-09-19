@@ -21,7 +21,7 @@ from .recorder import (
     write_exclusive,
 )
 from .subjects import SUBJECT_LABEL, investigate_subject, llm_subject
-from .tasks import TASKS, public_task, select_target, task_by_id
+from .tasks import TaskFileError, load_tasks, public_task, select_target, task_by_id
 from .verifiers import (
     FreshReader,
     answered_task_refusal,
@@ -723,6 +723,7 @@ def _run_tasks(
     tenant: str,
     *,
     failed_restores: list[dict[str, Any]],
+    tasks: tuple[dict[str, Any], ...] | None = None,
     task_ids: list[str] | None = None,
     today: date | None = None,
     transport: Any = None,
@@ -742,11 +743,16 @@ def _run_tasks(
         raise HarnessConfigurationError(
             f"Invalid subject {subject!r}; expected one of: deterministic, llm"
         )
-    requested_ids = list(task_ids) if task_ids else [task["id"] for task in TASKS]
+    if tasks is None:
+        try:
+            tasks = load_tasks()
+        except TaskFileError as error:
+            raise HarnessConfigurationError(str(error)) from None
+    requested_ids = list(task_ids) if task_ids else [task["id"] for task in tasks]
     if len(requested_ids) != len(set(requested_ids)):
         raise HarnessConfigurationError("Task ids must not be repeated")
     try:
-        selected_tasks = [task_by_id(task_id) for task_id in requested_ids]
+        selected_tasks = [task_by_id(tasks, task_id) for task_id in requested_ids]
     except KeyError as error:
         raise HarnessConfigurationError(f"Unknown task id: {error.args[0]}") from None
 
@@ -1073,6 +1079,7 @@ def _run_tasks(
 def run_tasks(
     tenant: str,
     *,
+    tasks: tuple[dict[str, Any], ...] | None = None,
     task_ids: list[str] | None = None,
     today: date | None = None,
     transport: Any = None,
@@ -1089,6 +1096,7 @@ def run_tasks(
         return _run_tasks(
             tenant,
             failed_restores=failed_restores,
+            tasks=tasks,
             task_ids=task_ids,
             today=today,
             transport=transport,

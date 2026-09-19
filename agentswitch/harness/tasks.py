@@ -1,7 +1,10 @@
 """Committed harness tasks and data-driven target selectors."""
 
+import json
 import time
+from collections.abc import Sequence
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -11,97 +14,88 @@ from .recorder import ReadOnlyTools
 from .rules import expected_observed_code, parse_date, selector_eligible
 
 PAGE_LIMIT = 1000
-MAIN_REQUEST = (
-    "This work order is late. Find out why, tell me what it blocks downstream, "
-    "and reschedule what you can."
-)
-
-TASKS: tuple[dict[str, Any], ...] = (
+TASKS_PATH = Path(__file__).with_name("tasks.jsonl")
+REQUEST_KINDS = frozenset({"work_order_lateness", "stock_ledger"})
+_TASK_KEYS = frozenset(
     {
-        "id": "late_open_oldest",
-        "request": MAIN_REQUEST,
-        "request_kind": "work_order_lateness",
-        "selector": "late_open_oldest",
-        "expected": {"outcome": "answered", "is_late": True},
-        "brief_refusal": False,
-        "reschedule": True,
-        "writes": False,
-    },
-    {
-        "id": "late_with_sales_order",
-        "request": MAIN_REQUEST,
-        "request_kind": "work_order_lateness",
-        "selector": "late_with_sales_order",
-        "expected": {"outcome": "answered", "is_late": True},
-        "brief_refusal": False,
-        "reschedule": True,
-        "writes": False,
-    },
-    {
-        "id": "late_with_cause",
-        "request": (
-            "This work order is late. List every open material request, subcontract order and job "
-            "card holding it up, and what it blocks downstream."
-        ),
-        "request_kind": "work_order_lateness",
-        "selector": "late_with_cause",
-        "expected": {"outcome": "answered", "is_late": True, "causes_present": True},
-        "brief_refusal": False,
-        "reschedule": False,
-        "writes": False,
-    },
-    {
-        "id": "not_late_completed",
-        "request": "Is this work order late? If so, find out why.",
-        "request_kind": "work_order_lateness",
-        "selector": "completed_most_recent",
-        "expected": {"outcome": "answered", "is_late": False},
-        "brief_refusal": False,
-        "reschedule": False,
-        "writes": False,
-    },
-    {
-        "id": "refuse_not_found",
-        "request": MAIN_REQUEST,
-        "request_kind": "work_order_lateness",
-        "selector": "fresh_uuid",
-        "expected": {"outcome": "refused", "refusal_reason": "not_found"},
-        "brief_refusal": True,
-        "reschedule": True,
-        "writes": False,
-    },
-    {
-        "id": "refuse_outside_seat",
-        "request": "Show the stock ledger for this item in every warehouse.",
-        "request_kind": "stock_ledger",
-        "selector": "none",
-        "expected": {
-            "outcome": "refused",
-            "refusal_reason": ["outside_seat", "unsupported"],
-        },
-        "brief_refusal": True,
-        "reschedule": False,
-        "writes": False,
-    },
-    {
-        "id": "reschedule_own_draft",
-        "request": "This draft work order is past its planned dates. Reschedule what you can.",
-        "request_kind": "work_order_lateness",
-        "selector": "own_draft_fixture",
-        "expected": {
-            "outcome": "answered",
-            "is_late": False,
-            "reschedule_action": "applied",
-        },
-        "brief_refusal": False,
-        "reschedule": True,
-        "writes": True,
-    },
+        "id",
+        "request",
+        "request_kind",
+        "selector",
+        "expected",
+        "brief_refusal",
+        "reschedule",
+        "writes",
+        "expectation",
+    }
 )
 
 
-def task_by_id(task_id: str) -> dict[str, Any]:
-    for task in TASKS:
+class TaskFileError(ValueError):
+    """The harness task data file is unreadable or invalid."""
+
+
+def _validate_task(task: Any, line_number: int) -> dict[str, Any]:
+    if not isinstance(task, dict):
+        raise TaskFileError(f"line {line_number}: task must be an object")
+    keys = set(task)
+    if keys != _TASK_KEYS:
+        missing = sorted(_TASK_KEYS - keys)
+        unknown = sorted(keys - _TASK_KEYS)
+        details = []
+        if missing:
+            details.append(f"missing keys: {', '.join(missing)}")
+        if unknown:
+            details.append(f"unknown keys: {', '.join(unknown)}")
+        raise TaskFileError(f"line {line_number}: {'; '.join(details)}")
+    for field in ("id", "request", "request_kind", "selector", "expectation"):
+        if not isinstance(task[field], str) or not task[field]:
+            raise TaskFileError(f"line {line_number}: {field} must be a non-empty string")
+    for field in ("brief_refusal", "reschedule", "writes"):
+        if not isinstance(task[field], bool):
+            raise TaskFileError(f"line {line_number}: {field} must be a boolean")
+    expected = task["expected"]
+    outcome = expected.get("outcome") if isinstance(expected, dict) else None
+    if not isinstance(outcome, str) or outcome not in {"answered", "refused"}:
+        raise TaskFileError(
+            f"line {line_number}: expected must be an object with outcome answered or refused"
+        )
+    if task["selector"] not in SELECTORS:
+        raise TaskFileError(f"line {line_number}: unknown selector {task['selector']!r}")
+    if task["request_kind"] not in REQUEST_KINDS:
+        raise TaskFileError(f"line {line_number}: unknown request_kind {task['request_kind']!r}")
+    return task
+
+
+def load_tasks(path: Path = TASKS_PATH) -> tuple[dict[str, Any], ...]:
+    """Load and validate harness tasks from a JSON Lines file."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise TaskFileError(f"could not read task file {path}: {error}") from None
+
+    tasks: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise TaskFileError(f"line {line_number}: invalid JSON: {error.msg}") from None
+        task = _validate_task(decoded, line_number)
+        task_id = task["id"]
+        if task_id in ids:
+            raise TaskFileError(f"line {line_number}: duplicate id {task_id!r}")
+        ids.add(task_id)
+        tasks.append(task)
+    if not tasks:
+        raise TaskFileError("task file must contain at least one task")
+    return tuple(tasks)
+
+
+def task_by_id(tasks: Sequence[dict[str, Any]], task_id: str) -> dict[str, Any]:
+    for task in tasks:
         if task["id"] == task_id:
             return task
     raise KeyError(task_id)
@@ -209,6 +203,19 @@ def _created_at_key(work_order: dict[str, Any]) -> tuple[datetime, str]:
     return parsed, str(work_order.get("id"))
 
 
+SELECTORS = frozenset(
+    {
+        "none",
+        "fresh_uuid",
+        "late_open_oldest",
+        "late_with_sales_order",
+        "late_with_cause",
+        "completed_most_recent",
+        "own_draft_fixture",
+    }
+)
+
+
 def select_target(
     task: dict[str, Any],
     tools: ReadOnlyTools,
@@ -310,4 +317,14 @@ def select_target(
     return base
 
 
-__all__ = ["MAIN_REQUEST", "PAGE_LIMIT", "TASKS", "public_task", "select_target", "task_by_id"]
+__all__ = [
+    "PAGE_LIMIT",
+    "REQUEST_KINDS",
+    "SELECTORS",
+    "TASKS_PATH",
+    "TaskFileError",
+    "load_tasks",
+    "public_task",
+    "select_target",
+    "task_by_id",
+]
