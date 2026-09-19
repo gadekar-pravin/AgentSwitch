@@ -164,7 +164,8 @@ once; `refuse_outside_seat` makes a single read. The 36 runs cost $0.24. Median 
 from 79 s to 75 s against one worker, because the model, not MCP, takes most of the time.
 
 Switch evidence (phase 8, 2026-09-19; plan section 14, answer 2). The graph agent became the LLM
-agent on this evidence; the team dropped the two-day condition the same day.
+agent on this evidence, signed off by the team on 2026-09-19; the team dropped the two-day
+condition the same day.
 
 - Verdicts: every counted `graph` run passed on the six read-only tasks, as `deterministic` did on
   the same day: phase 4 (36), phase 5 (36), phase 6 (6, Suryodaya) and phase 8 (12, one sweep per
