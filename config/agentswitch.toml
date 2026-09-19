@@ -24,6 +24,8 @@ output_usd_per_million = 0.30
 [budgets]
 # Per task run; plan section 14, answer 1.
 run_usd = 0.25
+# Per rubric judge call; plan section 14, answer 1.
+judge_usd = 0.05
 # One round is one model call from the agent loop; retries are extra attempts in that round.
 # 3 per round keeps today's two retries; 90 per run is 30 turns x 3.
 max_attempts_per_round = 3
@@ -52,3 +54,17 @@ page_size = 1000
 # Characters of each node's outcome shown to the planner, and of all outcomes together per round.
 projection_chars = 4000
 projection_total_chars = 40000
+
+[evals]
+# Secondary rubric judge settings (plan sections 7.5 and 8).
+judge_model = "z-ai/glm-5.3-flash"
+scale_max = 2
+floor = 1
+threshold = 1.5
+
+[evals.weights]
+addresses_task = 1
+specific = 1
+consistent = 1
+complete = 1
+meets_expectation = 1

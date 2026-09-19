@@ -23,10 +23,11 @@ from agentswitch.harness.audits import (
     terminal_last,
     write_after_target_read,
 )
-from agentswitch.harness.recorder import ScopedWriteTools
+from agentswitch.harness.recorder import ReadOnlyTools, ScopedWriteTools
 from agentswitch.harness.runner import (
     AUDIT_NAMES,
     SCHEMA_VERSION,
+    HarnessPersistenceError,
     _restore_fixture,
     _score_run,
     _score_verdict,
@@ -38,6 +39,7 @@ from agentswitch.offline import (
     offline_llm_client,
     scripted_tool_response,
 )
+from agentswitch.telemetry import build_spans
 
 TODAY = date(2026, 9, 19)
 TARGET = "WO-HARNESS"
@@ -1044,6 +1046,166 @@ def test_end_to_end_offline_graph_harness_run(
         "write": False,
         "reason": "task_read_only",
     }
+
+
+def test_real_offline_graph_record_builds_deterministic_nested_spans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec: AI (Codex) Real graph calls, attempts, rounds, and nodes form one span tree."""
+    config = _config(tmp_path, monkeypatch)
+    mcp_transport = OfflineMcpTransport(
+        CATALOGUE,
+        {"WorkOrder": [TARGET_RECORD, RELATED_RECORD]},
+    )
+    tools = ReadOnlyTools(
+        McpClient(
+            "https://offline.invalid",
+            "offline-token",
+            transport=mcp_transport,
+        ),
+        phase="subject",
+    )
+    answer = _answer_addition(depends_on=["target"])
+    raw_llm, _ = offline_llm_client(
+        config,
+        [
+            _response([_addition("target", "WorkOrder.get", {"id": TARGET})]),
+            _response([answer]),
+            _response([answer]),
+            _response([answer]),
+            _response([answer]),
+        ],
+    )
+    llm = MeteredClient(raw_llm, config, sleep=lambda _: None)
+    agent = run_graph_agent(
+        tools,
+        llm,
+        request="Investigate the late work order.",
+        target_id=TARGET,
+        today=TODAY,
+        own_user_id=USER,
+        reschedule_requested=False,
+        config=config,
+        authority={"write": False, "reason": "task_read_only"},
+    )
+    record = {
+        "run_file": "offline-graph.json",
+        "task": {"id": "offline_graph"},
+        "tenant": "suryodaya",
+        "subject": {"name": "graph_subject"},
+        "subject_output": {"agent": agent},
+        "economics": llm.ledger(),
+        "call_log": tools.calls,
+        "timings": {"started_at": "2026-09-19T00:00:00+00:00"},
+    }
+
+    first = build_spans(record)
+    second = build_spans(copy.deepcopy(record))
+    spans = first["spans"]
+    call_spans = [span for span in spans if span["span_id"].startswith("call:")]
+    ids = {span["span_id"] for span in spans}
+
+    assert first == second
+    assert len(call_spans) == len(tools.calls)
+    assert all(
+        span["parent_id"] is None or span["parent_id"] in ids for span in spans
+    )
+    assert all(
+        span["parent_id"].startswith("round:")
+        for span in spans
+        if "/attempt:" in span["span_id"]
+    )
+    node_calls = [
+        span
+        for span in call_spans
+        if span["attributes"].get("agentswitch.node") is not None
+    ]
+    assert node_calls
+    assert all(span["parent_id"] == "node:target" for span in node_calls)
+
+
+def test_graph_and_deterministic_harness_runs_write_spans_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec: AI (Codex) Both offline harness subjects persist a spans file after scoring."""
+    config = _config(tmp_path, monkeypatch)
+    raw_llm, _ = offline_llm_client(
+        config,
+        [
+            _response(
+                [
+                    _answer_addition(
+                        outcome="refused",
+                        refusal_reason="outside_seat",
+                    )
+                ]
+            )
+        ],
+    )
+    monkeypatch.setattr(runner.llm_client, "from_config", lambda *args, **kwargs: raw_llm)
+    transport = _HarnessTransport(OfflineMcpTransport([], {}))
+
+    graph_summary = run_tasks(
+        "suryodaya",
+        tasks=(_outside_seat_task(),),
+        today=TODAY,
+        transport=transport,
+        get_transport=_get_transport,
+        env_file=_env_file(tmp_path),
+        runs_dir=tmp_path / "graph-spans-runs",
+        subject="graph",
+    )[0]
+    deterministic_summary = run_tasks(
+        "suryodaya",
+        tasks=(_outside_seat_task(),),
+        today=TODAY,
+        transport=transport,
+        get_transport=_get_transport,
+        env_file=_env_file(tmp_path),
+        runs_dir=tmp_path / "deterministic-spans-runs",
+        subject="deterministic",
+    )[0]
+
+    for summary in (graph_summary, deterministic_summary):
+        spans_path = Path(summary["spans_path"])
+        assert spans_path.exists()
+        assert Path(summary["score_path"]).exists()
+        assert json.loads(spans_path.read_text(encoding="utf-8"))["schema"] == (
+            "agentswitch.spans/1"
+        )
+
+
+def test_spans_write_failure_raises_after_score_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec: AI (Codex) A spans persistence failure is fatal after score persistence."""
+    original_write = runner.write_exclusive
+
+    def fail_spans(path: Path, *args: Any, **kwargs: Any) -> Path:
+        if path.name.endswith(".spans.json"):
+            raise OSError("offline spans failure")
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "write_exclusive", fail_spans)
+    runs_dir = tmp_path / "failed-spans-runs"
+
+    with pytest.raises(HarnessPersistenceError, match="Could not persist spans"):
+        run_tasks(
+            "suryodaya",
+            tasks=(_outside_seat_task(),),
+            today=TODAY,
+            transport=_HarnessTransport(OfflineMcpTransport([], {})),
+            get_transport=_get_transport,
+            env_file=_env_file(tmp_path),
+            runs_dir=runs_dir,
+            subject="deterministic",
+        )
+
+    assert len(list(runs_dir.glob("*.score.json"))) == 1
+    assert list(runs_dir.glob("*.spans.json")) == []
 
 
 def test_end_to_end_offline_graph_harness_writes_receipt_and_restores(

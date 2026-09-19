@@ -12,13 +12,14 @@ from agentswitch import agent
 from agentswitch.agent import AgentError, run_agent
 from agentswitch.config import ConfigError, load_config
 from agentswitch.economics import BudgetExceeded, MeteredClient
-from agentswitch.llm_client import OpenRouterClient, OpenRouterError
+from agentswitch.llm_client import OpenRouterClient, OpenRouterError, from_config
 
 
 def _toml(
     *,
     model: str = "test/model",
     run_usd: str = "0.01",
+    judge_usd: str = "0.005",
     max_tokens: int = 10,
     attempts_per_round: int = 3,
     attempts_per_run: int = 10,
@@ -42,6 +43,7 @@ output_usd_per_million = {output_price}
 
 [budgets]
 run_usd = {run_usd}
+judge_usd = {judge_usd}
 max_attempts_per_round = {attempts_per_round}
 max_attempts_per_run = {attempts_per_run}
 admission_safety_factor = 1.0
@@ -56,6 +58,19 @@ soft_repairs = 1
 page_size = 100
 projection_chars = 1000
 projection_total_chars = 4000
+
+[evals]
+judge_model = "judge/model"
+scale_max = 2
+floor = 1
+threshold = 1.5
+
+[evals.weights]
+addresses_task = 1
+specific = 1
+consistent = 1
+complete = 1
+meets_expectation = 1
 '''
 
 
@@ -213,6 +228,64 @@ def test_budget_refuses_before_transport(tmp_path, monkeypatch):
     assert entries[0]["status"] == "refused"
 
 
+def test_explicit_budget_overrides_run_budget(tmp_path, monkeypatch):
+    """Spec: AI (Codex) An explicit model-call budget replaces the configured run budget."""
+    config = _config(tmp_path, monkeypatch, run_usd="0.01")
+    transport = ScriptedTransport([(200, _success())])
+    client = MeteredClient(
+        _raw(config, transport),
+        config,
+        budget_usd=0.000001,
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(BudgetExceeded):
+        client.chat([{"role": "user", "content": "hello"}])
+
+    assert client.ledger()["summary"]["budget_micro"] == 1
+    assert transport.calls == []
+
+
+def test_attempt_timestamps_use_injected_clock(tmp_path, monkeypatch):
+    """Spec: AI (Codex) A provider attempt records ordered injected monotonic timestamps."""
+    config = _config(tmp_path, monkeypatch)
+    transport = ScriptedTransport([(200, _success())])
+    readings = iter((101, 109))
+    client = MeteredClient(
+        _raw(config, transport),
+        config,
+        sleep=lambda _: None,
+        clock=lambda: next(readings),
+    )
+
+    client.chat([{"role": "user", "content": "hello"}])
+
+    entry = client.ledger()["entries"][0]
+    assert (entry["started_ns"], entry["finished_ns"]) == (101, 109)
+
+
+def test_refused_attempt_has_one_timestamp_reading(tmp_path, monkeypatch):
+    """Spec: AI (Codex) A refused admission records one timestamp as both boundaries."""
+    config = _config(tmp_path, monkeypatch, run_usd="0.000001")
+    transport = ScriptedTransport([(200, _success())])
+    readings = []
+
+    def clock():
+        readings.append(311)
+        return readings[-1]
+
+    client = MeteredClient(
+        _raw(config, transport), config, sleep=lambda _: None, clock=clock
+    )
+
+    with pytest.raises(BudgetExceeded):
+        client.chat([{"role": "user", "content": "hello"}])
+
+    entry = client.ledger()["entries"][0]
+    assert readings == [311]
+    assert entry["started_ns"] == entry["finished_ns"] == 311
+
+
 def test_provider_overrun_causes_next_round_refusal(tmp_path, monkeypatch):
     """Spec: AI (Codex) Provider cost above reservation records overrun and reduces admission."""
     config = _config(
@@ -298,6 +371,40 @@ def test_config_override_default_pricing_and_stable_hash(tmp_path, monkeypatch):
     assert first.overrides == ({"key": "models.agent", "source": "env"},)
     assert first.pricing_for() == ("pricing.default", first.pricing.default)
     assert first.sha256 == second.sha256
+    assert first.evals.judge_model == "judge/model"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        ('judge_model = "judge/model"\n', "", "evals.judge_model"),
+        (
+            "meets_expectation = 1\n",
+            "meets_expectation = 1\nunknown = 1\n",
+            "evals.weights.unknown",
+        ),
+        ("floor = 1\n", "floor = 3\n", "evals.floor"),
+    ],
+)
+def test_config_rejects_invalid_evals(tmp_path, monkeypatch, old, new, match):
+    """Spec: AI (Codex) Eval keys are required and closed, with floor bounded by scale."""
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    path = tmp_path / "bad.toml"
+    path.write_text(_toml().replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=match):
+        load_config(path, env_file=tmp_path / "missing.env")
+
+
+def test_from_config_model_override_does_not_change_agent_config(tmp_path, monkeypatch):
+    """Spec: AI (Codex) A client-only model override leaves the configured agent unchanged."""
+    config = _config(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-key")
+
+    client = from_config(config, model=config.evals.judge_model)
+
+    assert client.model == "judge/model"
+    assert config.models.agent == "test/model"
 
 
 def test_empty_model_override_is_invalid(tmp_path, monkeypatch):

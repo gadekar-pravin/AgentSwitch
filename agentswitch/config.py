@@ -15,6 +15,13 @@ from typing import Any
 from .mcp_client import _read_env_file
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "agentswitch.toml"
+JUDGE_CRITERIA = (
+    "addresses_task",
+    "specific",
+    "consistent",
+    "complete",
+    "meets_expectation",
+)
 
 
 class ConfigError(ValueError):
@@ -45,6 +52,7 @@ class PricingConfig:
 @dataclass(frozen=True)
 class BudgetConfig:
     run_usd: int | float
+    judge_usd: int | float
     max_attempts_per_round: int
     max_attempts_per_run: int
     admission_safety_factor: int | float
@@ -64,12 +72,22 @@ class LimitsConfig:
 
 
 @dataclass(frozen=True)
+class EvalsConfig:
+    judge_model: str
+    scale_max: int
+    floor: int
+    threshold: int | float
+    weights: dict[str, int | float]
+
+
+@dataclass(frozen=True)
 class Config:
     path: str
     models: ModelConfig
     pricing: PricingConfig
     budgets: BudgetConfig
     limits: LimitsConfig
+    evals: EvalsConfig
     values: dict[str, Any]
     overrides: tuple[dict[str, str], ...]
     sha256: str
@@ -166,7 +184,9 @@ def load_config(
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"cannot load config {selected_path}: {error}") from None
 
-    root = _require_keys(raw, {"models", "pricing", "budgets", "limits"}, "config")
+    root = _require_keys(
+        raw, {"models", "pricing", "budgets", "limits", "evals"}, "config"
+    )
     models_raw = _require_keys(
         root["models"],
         {"agent", "reasoning_effort", "seed", "max_tokens", "timeout_seconds"},
@@ -180,6 +200,7 @@ def load_config(
         root["budgets"],
         {
             "run_usd",
+            "judge_usd",
             "max_attempts_per_round",
             "max_attempts_per_run",
             "admission_safety_factor",
@@ -200,6 +221,14 @@ def load_config(
             "projection_total_chars",
         },
         "limits",
+    )
+    evals_raw = _require_keys(
+        root["evals"],
+        {"judge_model", "scale_max", "floor", "threshold", "weights"},
+        "evals",
+    )
+    weights_raw = _require_keys(
+        evals_raw["weights"], set(JUDGE_CRITERIA), "evals.weights"
     )
 
     agent = _string(models_raw["agent"], "models.agent")
@@ -239,6 +268,12 @@ def load_config(
     budgets = BudgetConfig(
         run_usd=_number(
             budgets_raw["run_usd"], "budgets.run_usd", minimum=0, inclusive=False
+        ),
+        judge_usd=_number(
+            budgets_raw["judge_usd"],
+            "budgets.judge_usd",
+            minimum=0,
+            inclusive=False,
         ),
         max_attempts_per_round=_integer(
             budgets_raw["max_attempts_per_round"],
@@ -296,6 +331,33 @@ def load_config(
         projection_chars=projection_chars,
         projection_total_chars=projection_total_chars,
     )
+    scale_max = _integer(evals_raw["scale_max"], "evals.scale_max", minimum=1)
+    floor = _integer(evals_raw["floor"], "evals.floor", minimum=0)
+    if floor > scale_max:
+        raise ConfigError("evals.floor must be at most evals.scale_max")
+    threshold = _number(
+        evals_raw["threshold"], "evals.threshold", minimum=0, inclusive=True
+    )
+    if threshold > scale_max:
+        raise ConfigError("evals.threshold must be at most evals.scale_max")
+    weights = {
+        criterion: _number(
+            weights_raw[criterion],
+            f"evals.weights.{criterion}",
+            minimum=0,
+            inclusive=True,
+        )
+        for criterion in JUDGE_CRITERIA
+    }
+    if not any(weight > 0 for weight in weights.values()):
+        raise ConfigError("evals.weights total must be greater than 0")
+    evals = EvalsConfig(
+        judge_model=_string(evals_raw["judge_model"], "evals.judge_model"),
+        scale_max=scale_max,
+        floor=floor,
+        threshold=threshold,
+        weights=weights,
+    )
     values = {
         "models": {
             "agent": models.agent,
@@ -319,6 +381,7 @@ def load_config(
         },
         "budgets": {
             "run_usd": budgets.run_usd,
+            "judge_usd": budgets.judge_usd,
             "max_attempts_per_round": budgets.max_attempts_per_round,
             "max_attempts_per_run": budgets.max_attempts_per_run,
             "admission_safety_factor": budgets.admission_safety_factor,
@@ -334,6 +397,13 @@ def load_config(
             "projection_chars": limits.projection_chars,
             "projection_total_chars": limits.projection_total_chars,
         },
+        "evals": {
+            "judge_model": evals.judge_model,
+            "scale_max": evals.scale_max,
+            "floor": evals.floor,
+            "threshold": evals.threshold,
+            "weights": dict(evals.weights),
+        },
     }
     canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode()).hexdigest()
@@ -343,6 +413,7 @@ def load_config(
         pricing=pricing,
         budgets=budgets,
         limits=limits,
+        evals=evals,
         values=values,
         overrides=tuple(overrides),
         sha256=digest,
@@ -354,6 +425,8 @@ __all__ = [
     "Config",
     "ConfigError",
     "DEFAULT_CONFIG_PATH",
+    "EvalsConfig",
+    "JUDGE_CRITERIA",
     "LimitsConfig",
     "ModelConfig",
     "PricingConfig",
