@@ -45,8 +45,8 @@ not change or add a provider without asking. The instructor says the platform's 
 integrated with our pipeline once the harness is ready (Release 1 note, 2026-09-17).
 
 Next: [docs/harness-architecture-plan.md](docs/harness-architecture-plan.md) ports the agent and
-harness to the S17Code architecture in phases. It is a draft for team review; do not start phase 1
-or later until the team agrees it.
+harness to the S17Code architecture in phases. The team agreed it on 2026-09-19; phase 1 is done.
+Follow the plan's phase order.
 
 ## Commands
 

@@ -5,12 +5,20 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
 from . import mcp_client
-from .investigate import analyze_causes, analyze_downstream, analyze_lateness
+from .answer import (
+    Store,
+    build_raw,
+    coverage,
+    is_hashable,
+    project_answer,
+    read_requirements,
+    refusal,
+)
+from .investigate import PAGE_LIMIT
 from .llm_client import from_env as llm_from_env
 from .mcp_client import (
     ArgumentError,
@@ -51,7 +59,6 @@ LIST_TOOL_FILTERS = {
     "BOM.list": (),
     "Workstation.list": (),
 }
-_PAGE_LIMIT = 1000
 _RESULT_CHARACTER_LIMIT = 60_000
 _REFUSAL_REASONS = {"not_found", "outside_seat", "unsupported", "source_unavailable"}
 
@@ -79,14 +86,6 @@ class AgentError(Exception):
         self.agent = agent
         self.transcript = agent.get("transcript", [])
         super().__init__(f"{self.original_type}: {error}")
-
-
-def _is_hashable(value: Any) -> bool:
-    try:
-        hash(value)
-    except TypeError:
-        return False
-    return True
 
 
 def _native_name(name: str) -> str:
@@ -246,105 +245,6 @@ def _declared_enum(schema: Any) -> list[Any] | None:
     return None
 
 
-@dataclass
-class _Store:
-    records: dict[str, dict[Any, list[dict[str, Any]]]] = field(default_factory=dict)
-    list_calls: list[dict[str, Any]] = field(default_factory=list)
-    endpoints: dict[str, list[Any]] = field(default_factory=dict)
-    endpoint_calls: list[dict[str, Any]] = field(default_factory=list)
-    successful_gets: list[dict[str, Any]] = field(default_factory=list)
-    target_before_reschedule: dict[str, Any] | None = None
-    target_snapshot_pinned: bool = False
-
-    def add_record(self, entity: str, record: dict[str, Any]) -> None:
-        identifier = record.get("id")
-        if identifier is None or not _is_hashable(identifier):
-            return
-        self.records.setdefault(entity, {}).setdefault(identifier, []).append(copy.deepcopy(record))
-
-    def add_get(
-        self,
-        tool: str,
-        arguments: dict[str, Any],
-        record: dict[str, Any],
-        *,
-        model_read: bool,
-    ) -> None:
-        self.add_record(tool.rsplit(".", 1)[0], record)
-        self.successful_gets.append(
-            {
-                "tool": tool,
-                "arguments": dict(arguments),
-                "record": copy.deepcopy(record),
-                "model_read": model_read,
-            }
-        )
-
-    def add_list(
-        self,
-        tool: str,
-        filters: dict[str, Any],
-        rows: list[dict[str, Any]],
-        *,
-        complete: bool,
-    ) -> None:
-        entity = tool.rsplit(".", 1)[0]
-        for row in rows:
-            self.add_record(entity, row)
-        self.list_calls.append(
-            {"tool": tool, "filters": copy.deepcopy(filters), "complete": complete}
-        )
-
-    def latest(self, entity: str, identifier: Any) -> dict[str, Any] | None:
-        if not _is_hashable(identifier):
-            return None
-        versions = self.records.get(entity, {}).get(identifier, [])
-        return versions[-1] if versions else None
-
-    def pin_target_before_reschedule(self, target_id: str) -> None:
-        target = self.latest_get("WorkOrder.get", target_id, model_only=True)
-        if target is None:
-            raise RuntimeError("Cannot pin a target that the model has not read successfully")
-        self.target_before_reschedule = copy.deepcopy(target)
-        self.target_snapshot_pinned = True
-
-    def target_for_claims(self, target_id: str) -> dict[str, Any] | None:
-        if self.target_snapshot_pinned:
-            return self.target_before_reschedule
-        return self.latest("WorkOrder", target_id)
-
-    def rows(self, entity: str) -> list[dict[str, Any]]:
-        return [versions[-1] for versions in self.records.get(entity, {}).values() if versions]
-
-    def latest_get(
-        self, tool: str, identifier: Any, *, model_only: bool = False
-    ) -> dict[str, Any] | None:
-        for call in reversed(self.successful_gets):
-            if model_only and call["model_read"] is not True:
-                continue
-            if call["tool"] == tool and call["arguments"].get("id") == identifier:
-                return call["record"]
-        return None
-
-    def got(self, tool: str, identifier: Any, *, model_only: bool = False) -> bool:
-        return self.latest_get(tool, identifier, model_only=model_only) is not None
-
-    def scanned(self, tool: str, filters: dict[str, Any]) -> bool:
-        return any(
-            call["tool"] == tool and call["filters"] == filters and call["complete"] is True
-            for call in self.list_calls
-        )
-
-    def scanned_either(self, tool: str, filters: dict[str, Any]) -> bool:
-        return self.scanned(tool, {}) or self.scanned(tool, filters)
-
-    def latest_endpoint_arguments(self, tool: str) -> dict[str, Any] | None:
-        for call in reversed(self.endpoint_calls):
-            if call["tool"] == tool:
-                return copy.deepcopy(call["arguments"])
-        return None
-
-
 def _project_value(value: Any, *, entity: str | None = None) -> Any:
     if isinstance(value, list):
         return [_project_value(item, entity=entity) for item in value]
@@ -497,7 +397,7 @@ def _error_result(error: Exception) -> dict[str, Any]:
 
 def _call_list(
     tools: Any,
-    store: _Store,
+    store: Store,
     tool: str,
     filters: dict[str, Any],
 ) -> dict[str, Any]:
@@ -509,7 +409,7 @@ def _call_list(
     try:
         while True:
             arguments = dict(filters)
-            arguments.update({"limit": _PAGE_LIMIT, "offset": offset})
+            arguments.update({"limit": PAGE_LIMIT, "offset": offset})
             result = tools.call_tool(tool, arguments, allow_write=False)
             envelope = result.structured
             if not isinstance(envelope, dict):
@@ -529,7 +429,7 @@ def _call_list(
             added = 0
             for row in page:
                 identifier = row.get("id")
-                hashable_identifier = identifier is not None and _is_hashable(identifier)
+                hashable_identifier = identifier is not None and is_hashable(identifier)
                 if hashable_identifier and identifier in seen_ids:
                     continue
                 if hashable_identifier:
@@ -559,7 +459,7 @@ def _call_list(
 
 def _call_read(
     tools: Any,
-    store: _Store,
+    store: Store,
     tool: str,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
@@ -588,121 +488,9 @@ def _call_read(
     return {"ok": True, "result": _render_endpoint_result(structured)}
 
 
-def _read_requirements(
-    store: _Store, target_id: str | None
-) -> list[tuple[str, str, dict[str, Any], bool]]:
-    requirements: list[tuple[str, str, dict[str, Any], bool]] = []
-
-    def require(name: str, tool: str, arguments: dict[str, Any], read: bool) -> None:
-        requirements.append((name, tool, arguments, read))
-
-    target = store.target_for_claims(target_id) if target_id is not None else None
-    require(
-        "WorkOrder.get target",
-        "WorkOrder.get",
-        {"id": target_id},
-        target_id is not None and store.got("WorkOrder.get", target_id),
-    )
-    linked_filters = {"work_order_id": target_id}
-    for tool in ("MaterialRequest.list", "SubcontractOrder.list", "JobCard.list"):
-        require(
-            tool,
-            tool,
-            linked_filters,
-            target_id is not None and store.scanned(tool, linked_filters),
-        )
-    require(
-        "DowntimeEntry.list",
-        "DowntimeEntry.list",
-        linked_filters,
-        target_id is not None and store.scanned("DowntimeEntry.list", linked_filters),
-    )
-    job_cards = [
-        row for row in store.rows("JobCard") if row.get("work_order_id") == target_id
-    ]
-    for job_card in job_cards:
-        job_card_id = job_card.get("id")
-        if job_card_id is not None:
-            arguments = {"job_card_id": job_card_id}
-            require(
-                f"DowntimeEntry.list job card {job_card_id}",
-                "DowntimeEntry.list",
-                arguments,
-                store.scanned("DowntimeEntry.list", arguments),
-            )
-    inspection_filters = {"reference_type": "WorkOrder", "reference_id": target_id}
-    require(
-        "QualityInspection.list",
-        "QualityInspection.list",
-        inspection_filters,
-        target_id is not None
-        and store.scanned("QualityInspection.list", inspection_filters),
-    )
-    for tool in (
-        "EngineeringChangeOrder.list",
-        "BOM.list",
-        "Workstation.list",
-    ):
-        require(tool, tool, {}, store.scanned(tool, {}))
-    if isinstance(target, dict) and target.get("bom_id") is not None:
-        bom_id = target["bom_id"]
-        require(
-            "BOM.get target BOM",
-            "BOM.get",
-            {"id": bom_id},
-            store.got("BOM.get", bom_id),
-        )
-    if isinstance(target, dict) and target.get("sales_order_id") is not None:
-        sales_order_id = target["sales_order_id"]
-        require(
-            "SalesOrder.get linked order",
-            "SalesOrder.get",
-            {"id": sales_order_id},
-            store.got("SalesOrder.get", sales_order_id),
-        )
-
-    matching_bom_ids: list[Any] = []
-    item_id = target.get("item_id") if isinstance(target, dict) else None
-    if item_id is not None:
-        for bom in store.rows("BOM"):
-            materials = bom.get("materials")
-            if isinstance(materials, list) and any(
-                isinstance(material, dict) and material.get("item_id") == item_id
-                for material in materials
-            ):
-                bom_id = bom.get("id")
-                if bom_id is not None and bom_id not in matching_bom_ids:
-                    matching_bom_ids.append(bom_id)
-    for bom_id in matching_bom_ids:
-        arguments = {"bom_id": bom_id}
-        require(
-            f"WorkOrder.list consumer BOM {bom_id}",
-            "WorkOrder.list",
-            arguments,
-            store.scanned("WorkOrder.list", arguments),
-        )
-    endpoint_tool = "endpoint.manufacturing.finite_schedule"
-    require(
-        "endpoint.manufacturing.finite_schedule",
-        endpoint_tool,
-        store.latest_endpoint_arguments(endpoint_tool) or {},
-        bool(store.endpoints.get(endpoint_tool)),
-    )
-    return requirements
-
-
-def _coverage(store: _Store, target_id: str | None, *, rescheduled: bool) -> dict[str, str]:
-    coverage = {
-        name: "read" if read else "missing"
-        for name, _tool, _arguments, read in _read_requirements(store, target_id)
-    }
-    coverage["reschedule_work_order"] = "invoked" if rescheduled else "not_invoked"
-    return coverage
-
-
-def _missing_read_calls(store: _Store, target_id: str | None) -> list[str]:
+def _missing_read_calls(store: Store, target_id: str | None) -> list[str]:
     calls: list[str] = []
-    for _name, tool, arguments, read in _read_requirements(store, target_id):
+    for _name, tool, arguments, read in read_requirements(store, target_id):
         if read:
             continue
         native = _native_name(tool)
@@ -719,120 +507,8 @@ def _missing_read_calls(store: _Store, target_id: str | None) -> list[str]:
     return calls
 
 
-def _build_raw(store: _Store, target_id: str, *, today: date) -> dict[str, Any]:
-    work_order = store.target_for_claims(target_id)
-    if work_order is None:
-        raise RuntimeError("No target work-order record is available")
-
-    material_requests = [
-        row for row in store.rows("MaterialRequest") if row.get("work_order_id") == target_id
-    ]
-    subcontract_orders = [
-        row for row in store.rows("SubcontractOrder") if row.get("work_order_id") == target_id
-    ]
-    job_cards = [row for row in store.rows("JobCard") if row.get("work_order_id") == target_id]
-    job_card_ids = [row.get("id") for row in job_cards if row.get("id") is not None]
-    downtime_entries = [
-        row
-        for row in store.rows("DowntimeEntry")
-        if row.get("work_order_id") == target_id or row.get("job_card_id") in job_card_ids
-    ]
-    quality_inspections = [
-        row
-        for row in store.rows("QualityInspection")
-        if row.get("reference_type") == "WorkOrder" and row.get("reference_id") == target_id
-    ]
-    engineering_changes = store.rows("EngineeringChangeOrder")
-    bom_id = work_order.get("bom_id")
-    bom = store.latest("BOM", bom_id) if bom_id is not None else None
-    boms = store.rows("BOM")
-    sales_order_id = work_order.get("sales_order_id")
-    sales_order = store.latest("SalesOrder", sales_order_id) if sales_order_id is not None else None
-
-    matching_bom_ids: list[Any] = []
-    item_id = work_order.get("item_id")
-    if item_id is not None:
-        for candidate in boms:
-            materials = candidate.get("materials")
-            if isinstance(materials, list) and any(
-                isinstance(material, dict) and material.get("item_id") == item_id
-                for material in materials
-            ):
-                candidate_id = candidate.get("id")
-                if candidate_id is not None and candidate_id not in matching_bom_ids:
-                    matching_bom_ids.append(candidate_id)
-    work_orders_by_bom = {
-        candidate_id: [
-            row for row in store.rows("WorkOrder") if row.get("bom_id") == candidate_id
-        ]
-        for candidate_id in matching_bom_ids
-    }
-
-    schedule_order = None
-    endpoint_values = store.endpoints.get("endpoint.manufacturing.finite_schedule", [])
-    if endpoint_values:
-        envelope = endpoint_values[-1]
-        result = envelope.get("result") if isinstance(envelope, dict) else None
-        orders = result.get("orders") if isinstance(result, dict) else None
-        if isinstance(orders, list):
-            schedule_order = next(
-                (
-                    row
-                    for row in orders
-                    if isinstance(row, dict) and row.get("work_order_id") == target_id
-                ),
-                None,
-            )
-
-    cause_findings = analyze_causes(
-        work_order,
-        material_requests=material_requests,
-        subcontract_orders=subcontract_orders,
-        job_cards=job_cards,
-        downtime_entries=downtime_entries,
-        quality_inspections=quality_inspections,
-        engineering_change_orders=engineering_changes,
-        bom=bom,
-        workstations=store.rows("Workstation"),
-        schedule_order=schedule_order,
-        today=today,
-    )
-    downstream_findings = analyze_downstream(
-        work_order,
-        sales_order=sales_order,
-        boms=boms,
-        work_orders_by_bom=work_orders_by_bom,
-    )
-    coverage = _coverage(store, target_id, rescheduled=False)
-    unknowns: list[str] = []
-    for key, status in coverage.items():
-        if status == "missing" and key != "reschedule_work_order":
-            message = f"{key} was not read completely by the agent"
-            if message not in unknowns:
-                unknowns.append(message)
-    for message in cause_findings["unknowns"] + downstream_findings["unknowns"]:
-        if message not in unknowns:
-            unknowns.append(message)
-    stock_unknown = (
-        "Material availability was not checked: its tool is not read-only and the seat cannot "
-        "read the stock ledger."
-    )
-    if stock_unknown not in unknowns:
-        unknowns.append(stock_unknown)
-    return {
-        "found": True,
-        "work_order_id": target_id,
-        "today": today.isoformat(),
-        "work_order": copy.deepcopy(work_order),
-        "lateness": analyze_lateness(work_order, today=today),
-        "causes": cause_findings["causes"],
-        "downstream": downstream_findings["downstream"],
-        "unknowns": unknowns,
-    }
-
-
 class _RecordingProxy:
-    def __init__(self, tools: Any, store: _Store) -> None:
+    def __init__(self, tools: Any, store: Store) -> None:
         self.tools = tools
         self.store = store
 
@@ -978,7 +654,7 @@ def run_agent(
     if max_turns < 1:
         raise ValueError("max_turns must be positive")
     transcript: list[dict[str, Any]] = []
-    store = _Store()
+    store = Store()
     usage_calls: list[dict[str, Any]] = []
     repairs: list[str] = []
     reschedule_result: dict[str, Any] | None = None
@@ -998,7 +674,7 @@ def run_agent(
             "model": last_model,
             "turns": completed_turns,
             "repairs": list(repairs),
-            "coverage": _coverage(store, target_id, rescheduled=reschedule_invoked),
+            "coverage": coverage(store, target_id, rescheduled=reschedule_invoked),
         }
 
     def tool_message(
@@ -1080,7 +756,7 @@ def run_agent(
                 reschedule_attempted = True
                 try:
                     store.pin_target_before_reschedule(target_id)
-                    causes = _build_raw(store, target_id, today=today)["causes"]
+                    causes = build_raw(store, target_id, today=today)["causes"]
                     reschedule_result = reschedule(
                         _RecordingProxy(tools, store),
                         target_id,
@@ -1281,8 +957,8 @@ def run_agent(
                 None,
             )
 
-        coverage = _coverage(store, target_id, rescheduled=reschedule_invoked)
-        missing = [key for key, status in coverage.items() if status == "missing"]
+        coverage_result = coverage(store, target_id, rescheduled=reschedule_invoked)
+        missing = [key for key, status in coverage_result.items() if status == "missing"]
         if outcome == "answered" and missing and not coverage_repair_issued:
             coverage_repair_issued = True
             repair = (
@@ -1290,7 +966,7 @@ def run_agent(
                 + "; ".join(_missing_read_calls(store, target_id))
                 + ". Only these exact arguments count; extra filters make a read non-covering"
             )
-            if coverage["reschedule_work_order"] == "not_invoked":
+            if coverage_result["reschedule_work_order"] == "not_invoked":
                 repair += ". If the request asks to reschedule, call reschedule_work_order"
             repairs.append(repair)
             return (
@@ -1304,7 +980,7 @@ def run_agent(
             "outcome": outcome,
             "refusal_reason": refusal_reason if outcome == "refused" else None,
             "prose": prose,
-            "coverage": coverage,
+            "coverage": coverage_result,
         }
         return {"ok": True, "accepted": True}, accepted
 
@@ -1409,7 +1085,7 @@ def run_agent(
                 }
                 if accepted["outcome"] == "answered":
                     assert target_id is not None
-                    final["raw"] = _build_raw(store, target_id, today=today)
+                    final["raw"] = build_raw(store, target_id, today=today)
                 return final
 
         raise AgentIncomplete(
@@ -1460,13 +1136,11 @@ def main() -> int:
         own_user_id=client.current_user_id(),
         allow_write=args.allow_draft_writes,
     )
-    from .harness.subjects import _project_answer, _refusal
-
     if result["outcome"] == "answered":
-        answer = _project_answer(result["raw"], args.work_order, result.get("reschedule"))
+        answer = project_answer(result["raw"], args.work_order, result.get("reschedule"))
         answer["prose"] = result["prose"]
     else:
-        answer = _refusal(result["refusal_reason"], args.work_order)
+        answer = refusal(result["refusal_reason"], args.work_order)
         answer["prose"] = result["prose"]
     print(result["prose"])
     print(json.dumps(answer, indent=2, ensure_ascii=False, default=str))

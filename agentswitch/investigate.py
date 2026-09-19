@@ -17,7 +17,7 @@ from typing import Any
 
 from .mcp_client import InvalidParams, McpClient, PermissionDenied, ProtocolError, ToolNotFound
 
-_PAGE_LIMIT = 1000
+PAGE_LIMIT = 1000
 
 _WORK_ORDER_STATES = {
     "draft",
@@ -536,6 +536,24 @@ def analyze_causes(
     return {"causes": causes, "unknowns": unknowns}
 
 
+def matching_bom_ids(boms: list[dict[str, Any]], item_id: Any) -> list[Any]:
+    if item_id is None:
+        return []
+    matches: list[Any] = []
+    for bom in boms:
+        materials = bom.get("materials")
+        if not isinstance(materials, list):
+            continue
+        if any(
+            isinstance(material, dict) and material.get("item_id") == item_id
+            for material in materials
+        ):
+            bom_id = bom.get("id")
+            if bom_id is not None and bom_id not in matches:
+                matches.append(bom_id)
+    return matches
+
+
 def analyze_downstream(
     work_order: dict[str, Any],
     *,
@@ -576,22 +594,12 @@ def analyze_downstream(
         )
 
     item_id = work_order.get("item_id")
-    matching_bom_ids: list[Any] = []
-    if item_id is not None:
-        for bom in boms:
-            materials = bom.get("materials")
-            if not isinstance(materials, list):
-                continue
-            if any(isinstance(material, dict) and material.get("item_id") == item_id for material in materials):
-                bom_id = bom.get("id")
-                if bom_id is not None and bom_id not in matching_bom_ids:
-                    matching_bom_ids.append(bom_id)
 
     target_id = work_order.get("id")
     target_end = _parse_date(work_order.get("planned_end_date"))
     consumers: list[dict[str, Any]] = []
     seen_ids: set[Any] = set()
-    for bom_id in matching_bom_ids:
+    for bom_id in matching_bom_ids(boms, item_id):
         for candidate in work_orders_by_bom.get(bom_id, []):
             candidate_id = candidate.get("id")
             if candidate_id == target_id or candidate_id in seen_ids:
@@ -708,7 +716,7 @@ class _Collector:
         offset = 0
         while True:
             arguments = dict(filters)
-            arguments.update({"limit": _PAGE_LIMIT, "offset": offset})
+            arguments.update({"limit": PAGE_LIMIT, "offset": offset})
             try:
                 result = self.client.call_tool(tool, arguments)
             except PermissionDenied as error:
@@ -904,22 +912,9 @@ def investigate(client: McpClient, work_order_id: Any, *, today: date) -> dict[s
                 f"SalesOrder.get could not obtain the linked sales order ({sales_outcome}).",
             )
 
-    matching_bom_ids: list[Any] = []
     item_id = work_order.get("item_id")
-    if item_id is not None:
-        for candidate_bom in boms:
-            materials = candidate_bom.get("materials")
-            if not isinstance(materials, list):
-                continue
-            if any(
-                isinstance(material, dict) and material.get("item_id") == item_id
-                for material in materials
-            ):
-                candidate_bom_id = candidate_bom.get("id")
-                if candidate_bom_id is not None and candidate_bom_id not in matching_bom_ids:
-                    matching_bom_ids.append(candidate_bom_id)
     work_orders_by_bom: dict[Any, list[dict[str, Any]]] = {}
-    for consumer_bom_id in matching_bom_ids:
+    for consumer_bom_id in matching_bom_ids(boms, item_id):
         work_orders_by_bom[consumer_bom_id] = collect_list(
             "WorkOrder.list",
             {"bom_id": consumer_bom_id},
@@ -987,4 +982,11 @@ def investigate(client: McpClient, work_order_id: Any, *, today: date) -> dict[s
     }
 
 
-__all__ = ["analyze_causes", "analyze_downstream", "analyze_lateness", "investigate"]
+__all__ = [
+    "PAGE_LIMIT",
+    "analyze_causes",
+    "analyze_downstream",
+    "analyze_lateness",
+    "investigate",
+    "matching_bom_ids",
+]

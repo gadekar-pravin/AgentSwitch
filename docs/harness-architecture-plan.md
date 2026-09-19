@@ -1,7 +1,7 @@
 # Plan: move the agent and harness to the S17Code architecture
 
-Status: draft for team review (2026-09-19). Nothing here is built yet. No code changes until the team
-agrees this plan.
+Status: agreed by the team (2026-09-19). Phase 1 is done (see section 10); phases 2 and later are not
+started.
 
 Reference architecture: S17Code (`EAG3-17/S17Code`, package `s17code/`, `config/`, `proofs/`). We port
 its patterns into `agentswitch/`. We do not depend on or import S17Code.
@@ -426,7 +426,7 @@ a failure of the phase.
 | Phase | Work | Exit criterion |
 | --- | --- | --- |
 | 0 | This plan. Fix the stale "scaffold only" section of `CLAUDE.md` (done 2026-09-19: now lists what exists and points here). The `CLAUDE.md` test-authorship change is committed (`9d8b00e`) | Team agrees the plan and the `CLAUDE.md` changes |
-| 1 | Untangle: create `answer.py`; remove `agent.main`'s import from `harness.subjects`; one shared page-size constant and one BOM-matching helper for `agent.py` and `investigate.py` (not for `rules.py`) | ruff clean; `deterministic` and `llm` verdicts unchanged on the read-only tasks on Suryodaya |
+| 1 | Untangle: create `answer.py`; remove `agent.main`'s import from `harness.subjects`; one shared page-size constant and one BOM-matching helper for `agent.py` and `investigate.py` (not for `rules.py`). Done 2026-09-19: `answer.py` holds `Store`, `read_requirements`, `coverage`, `build_raw`, `refusal` and `project_answer`; `investigate.py` holds `PAGE_LIMIT` and `matching_bom_ids`. The verifiers keep their own copies | ruff clean; `deterministic` and `llm` verdicts unchanged on the read-only tasks on Suryodaya. Met 2026-09-19: 6/6 pass for both subjects before and after the change, one run each; `deterministic` answers identical |
 | 2 | Config and economics: TOML loader, metered seam with the retry loop inside it, `max_tokens`, ledger in the run record, all under the current `llm` subject | Same verdicts; a run with a tiny budget fails visibly and is persisted; effective config recorded |
 | 2b | Task data to `tasks.jsonl` (harness only; can run beside 3–6) | `deterministic` verdicts unchanged |
 | 3 | Capability registry from the live catalogue; the current loop uses `validate()` | The read part of the manifest matches today's `build_tool_menu` on the same catalogue |
