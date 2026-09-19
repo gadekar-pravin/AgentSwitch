@@ -259,18 +259,23 @@ uv run python -m agentswitch.harness --tenant suryodaya --subject graph --judge 
   refusal is the model's own decision. The run record also keeps the model transcript, token usage
   and cost, including for failed runs.
 
-Known scoring limits. These need the book to change during a run, or a list longer than one page.
-None has been seen on either tenant.
+How scoring treats platform faults and data drift. The agent is not blamed for what it could not
+see:
 
-- A list longer than 1,000 rows is read in pages. If rows are added or removed between pages, the
-  harness does not notice, so target selection or a check can miss a row. Tenant lists are about
-  100 rows, so everything is read in one page.
-- If the platform returns an empty or duplicate page before the reported total, the harness
-  scores the subject's incomplete scan as `fail`, not `inconclusive`.
-- A work order that was closed when the subject read it, but open at verification, scores `pass`
-  when the answer leaves it out. The answer was right when the subject read the data.
-- If a BOM gains the target item between the subject's read and verification, an open work order on
-  that BOM scores `fail` when the answer leaves it out, although the subject could not have seen it.
+- A subject list scan broken by the platform (an invalid page, a missing or duplicate id, an empty
+  page before the reported total, or a total that changes between pages) scores `inconclusive`. A
+  subject that sends wrong paging arguments or stops paging early still scores `fail`.
+- An omitted work order scores `inconclusive`, not `fail`, when the data changed after the subject
+  read it: a complete subject scan did not list it, its BOM lacked the target item in every read
+  the subject made of that BOM, or its BOM appeared after a complete subject BOM scan. BOM changes
+  are no excuse if any of the subject's reads of the work order's BOMs showed the item; the other
+  excuses (a complete scan, a platform fault, a status change) still apply.
+- A work order the subject saw as not a consumer that is a consumer at verification scores
+  `inconclusive`, not `pass`.
+
+Known scoring limit. It needs a list longer than one page, which neither tenant has: lists above
+1,000 rows are read in pages, and if rows are added and removed between pages so that the total
+stays the same, the harness does not notice. Tenant lists are about 100 rows.
 
 ## Checks
 
