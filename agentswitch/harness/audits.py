@@ -27,6 +27,15 @@ class _Broken(ValueError):
     """Persisted evidence clearly violates a graph or journal rule."""
 
 
+class _BlockingMismatch(_Broken):
+    """A failed node's required descendant-blocking event is absent or invalid."""
+
+    def __init__(self, node: str, blocked_by: str, message: str) -> None:
+        super().__init__(message)
+        self.node = node
+        self.blocked_by = blocked_by
+
+
 class _MissingNodeKey(_Malformed):
     """A persisted graph node omits a required export key."""
 
@@ -138,13 +147,36 @@ def _add_patch(state: dict[str, Any], event: dict[str, Any]) -> None:
         state["edges"].update((parent, node_id) for parent in dependencies)
 
 
-def _apply_transition(state: dict[str, Any], event: dict[str, Any]) -> None:
+def _pending_descendants(state: dict[str, Any], node_id: str) -> tuple[str, ...]:
+    children: dict[str, set[str]] = {}
+    for source, target in state["edges"]:
+        children.setdefault(source, set()).add(target)
+    descendants: set[str] = set()
+    pending = list(children.get(node_id, ()))
+    while pending:
+        descendant = pending.pop()
+        if descendant in descendants:
+            continue
+        descendants.add(descendant)
+        pending.extend(children.get(descendant, ()))
+    return tuple(
+        sorted(
+            descendant
+            for descendant in descendants
+            if state["nodes"][descendant]["state"] == "pending"
+        )
+    )
+
+
+def _apply_transition(
+    state: dict[str, Any], event: dict[str, Any]
+) -> tuple[str, ...]:
     event_type = event["type"]
     if event_type == "graph_patched":
         _add_patch(state, event)
-        return
+        return ()
     if event_type not in {"task_started", "task_succeeded", "task_failed"}:
-        return
+        return ()
     node_id = event.get("node")
     if not isinstance(node_id, str) or node_id not in state["nodes"]:
         raise _Broken(f"{event_type} names an unknown node {node_id!r}")
@@ -153,7 +185,7 @@ def _apply_transition(state: dict[str, Any], event: dict[str, Any]) -> None:
         if node["state"] != "pending":
             raise _Broken(f"node {node_id!r} started from state {node['state']!r}")
         node["state"] = "running"
-        return
+        return ()
     if event_type == "task_succeeded":
         outcome = event["data"].get("outcome")
         if not isinstance(outcome, dict):
@@ -164,7 +196,7 @@ def _apply_transition(state: dict[str, Any], event: dict[str, Any]) -> None:
             )
         node["state"] = "succeeded"
         node["outcome"] = deepcopy(outcome)
-        return
+        return ()
     reason = event["data"].get("reason")
     if not isinstance(reason, str) or not reason:
         raise _Malformed(f"node {node_id!r} failure reason must be a string")
@@ -176,12 +208,48 @@ def _apply_transition(state: dict[str, Any], event: dict[str, Any]) -> None:
     node["state"] = "failed"
     node["failure_reason"] = reason
     node["error_detail"] = deepcopy(event["data"].get("detail"))
+    if reason == "blocked":
+        return ()
+    return _pending_descendants(state, node_id)
 
 
 def _replay(events: list[dict[str, Any]]) -> dict[str, Any]:
     state = _empty_replay()
-    for event in events:
-        _apply_transition(state, event)
+    index = 0
+    while index < len(events):
+        event = events[index]
+        if (
+            event["type"] == "task_failed"
+            and event["data"].get("reason") == "blocked"
+        ):
+            raise _Broken(
+                f"node {event.get('node')!r} has an unexpected blocking failure event"
+            )
+        descendants = _apply_transition(state, event)
+        for descendant in descendants:
+            index += 1
+            if index >= len(events):
+                raise _BlockingMismatch(
+                    descendant,
+                    event["node"],
+                    f"node {descendant!r} is missing its blocking failure event",
+                )
+            blocked = events[index]
+            if (
+                blocked["type"] != "task_failed"
+                or blocked.get("node") != descendant
+                or blocked["data"].get("reason") != "blocked"
+                or blocked["data"].get("detail")
+                != {"blocked_by": event["node"]}
+            ):
+                raise _BlockingMismatch(
+                    descendant,
+                    event["node"],
+                    f"node {descendant!r} has a missing or mismatched "
+                    f"blocking failure event after {event['node']!r}",
+                )
+            _apply_transition(state, blocked)
+        index += 1
     return state
 
 
@@ -269,6 +337,14 @@ def journal_consistent(record: dict[str, Any]) -> dict[str, Any]:
         events = _events(record)
         replayed = _replay(events)
         persisted = _persisted_graph(record)
+    except _BlockingMismatch as error:
+        return _result(
+            name,
+            "fail",
+            str(error),
+            node=error.node,
+            blocked_by=error.blocked_by,
+        )
     except _Broken as error:
         return _result(name, "fail", str(error))
     except _MissingNodeKey as error:
