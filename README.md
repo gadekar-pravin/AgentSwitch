@@ -79,7 +79,13 @@ downstream) from the records the model actually read, using the same rules as `i
 
 - The model sees 14 read-only tools from the seat's `tools/list`, plus two local actions:
   `reschedule_work_order` and `finish`. Each list tool offers only the filters that tool needs, and
-  code pages every list to its end.
+  code pages every list to its end. The menu comes from the capability registry in
+  [agentswitch/capabilities.py](agentswitch/capabilities.py).
+- Code checks every tool call's arguments against that tool's schema before calling MCP: unknown or
+  missing keys, types, enums, lengths and ranges, plus the list-filter rules (no empty or `:placeholder`
+  values, `*_id` filters are strings). A rejected call gets an `invalid_params` reply and is not sent.
+  Values are never trimmed or defaulted. A seat tool whose schema uses a construct the check does not
+  support is left off the menu and listed under `manifest.dropped` in the run record.
 - The only write is `reschedule_work_order`, which runs `reschedule()`: planned dates on a draft
   created by our login. From the command line it writes only with `--allow-draft-writes`.
 - If the answer misses a required read, the agent gets one repair message naming the exact calls
