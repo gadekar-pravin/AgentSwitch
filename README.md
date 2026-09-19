@@ -116,22 +116,30 @@ the completed order and the late order with causes:
 `google/gemini-3.8-flash` passed 4/4 in an earlier run at $0.25 per late order and was dropped on
 cost.
 
-Graph agent against the old loop, early figures (2026-09-19, Suryodaya, GLM-5.3-flash, one run
-each; OpenRouter's reported cost). The old loop's six read-only tasks cost about $0.12 in total.
-The graph agent's first runs cost less on every task measured so far, roughly 2–3 times less
-overall. These are single runs; the phase 4 exit runs (3 per tenant) will replace them.
+Graph agent (`--subject graph`) against the old loop, phase 4 exit runs (2026-09-19, GLM-5.3-flash,
+code at `6f4e740`): 3 runs per task on each tenant, 36/36 pass, the same verdicts as the deterministic
+subject (36/36). Costs are OpenRouter's reported cost; the old-loop column is one Suryodaya run from
+the same day (the old loop has not been run on Keystone).
 
-| Task | Old loop (`llm`) | Graph agent (`graph`) |
-| --- | --- | --- |
-| late_open_oldest | $0.036 | $0.020 |
-| late_with_sales_order | $0.032 | $0.005 |
-| late_with_cause | $0.027 | $0.009 |
-| not_late_completed | $0.012 | not yet run |
-| refuse_not_found | $0.009 | not yet run |
-| refuse_outside_seat | $0.0003 | $0.0006 |
+| Task | Old loop, Suryodaya | Graph, Suryodaya (median / max) | Graph, Keystone (median / max) |
+| --- | --- | --- | --- |
+| late_open_oldest | $0.036 | $0.005 / $0.008 | $0.008 / $0.019 |
+| late_with_sales_order | $0.032 | $0.008 / $0.015 | $0.011 / $0.014 |
+| late_with_cause | $0.027 | $0.005 / $0.005 | $0.009 / $0.010 |
+| not_late_completed | $0.012 | $0.006 / $0.006 | $0.006 / $0.008 |
+| refuse_not_found | $0.009 | $0.002 / $0.003 | $0.004 / $0.006 |
+| refuse_outside_seat | $0.0003 | $0.0004 / $0.0004 | $0.0004 / $0.0004 |
 
-The graph agent is slower per task: most of its time is the model's final planning round (one
-late-order run took almost 10 minutes, of which MCP reads were 33 seconds).
+- All 36 graph runs cost $0.21 together; a six-task pass costs about $0.03, against $0.12 for the old
+  loop on Suryodaya.
+- Planner replies were well-formed in 122 of 124 rounds; runs used 1 to 7 rounds. Across the 36 runs
+  the planner needed 13 hard repairs and 6 soft repairs; the most any single run
+  used was 2 hard and 1 soft, against limits of 5 and 2.
+- A task takes about 1 to 2.5 minutes (median). Most of the time is the model; the MCP reads of a
+  late order take about 30 seconds.
+- Two fixes came from the first round of exit runs: OpenRouter's `finish_reason: error` is now retried
+  within the round (it had failed one run), and `answer` no longer takes dependencies (naming the
+  failed target read had cost refusals up to 4 hard repairs).
 
 ## Harness
 
