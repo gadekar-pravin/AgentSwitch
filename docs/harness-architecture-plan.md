@@ -369,7 +369,8 @@ mode is only for proofs and cannot write to `/runs/`.
   - `[models]`: agent model, reasoning effort, seed, `max_tokens`, timeouts, retry count.
   - `[pricing]`: price per million input and output tokens per model, and a default row so an unknown
     model is never free.
-  - `[budgets]`: per-run budget, judge budget, attempt ceilings, admission safety factor.
+  - `[budgets]`: per-run budget (provisionally $0.25 per task run), judge budget (provisionally $0.05
+    per task), attempt ceilings, admission safety factor.
   - `[limits]`: `max_nodes`, `max_new_tasks`, `max_workers`, hard and soft repair counts, page size,
     projection size, `replan`.
   - `[evals]`: rubric criteria, weights, scale, threshold, per-criterion floor, judge model.
@@ -433,7 +434,7 @@ a failure of the phase.
 | 5 | Concurrency: locks on the MCP request id and the recorders, per-call start/end sequences and node ids, pool shutdown before restore; `max_workers` above 1 | Same verdicts as phase 4 with `max_workers = 4`; journal shows overlapping reads with correct node attribution |
 | 6 | The write: write authority, pin, receipt, exclusive rule | Tests 3, 8 and 9 pass. `reschedule_own_draft` passes and restores on Suryodaya with `graph`; `writes_in_scope`, `write_after_target_read` and `single_subject_write` pass |
 | 7 | Spans file and judge sidecar, `--judge` | `deterministic` verdicts unchanged; a forced `judge_failed` changes neither verdict nor exit code |
-| 8 | Switch: `graph` becomes the LLM subject after the comparison in open question 2; update README and `CLAUDE.md`. Whether the old loop is deleted is open question 3 | Team sign-off |
+| 8 | Switch: `graph` becomes the LLM subject when the switch criteria in section 14 (answer 2) are met; update README and `CLAUDE.md`. The old loop stays as a frozen baseline (answer 3) | Team sign-off |
 
 The phase 4 comparison is against `deterministic`, because the `llm` subject has not yet been run on
 Keystone.
@@ -481,11 +482,28 @@ autonomy. Each can be added later if a task needs it.
   client's retry loop, the pre-write pin, the read-only tasks that require a reschedule claim,
   `usage.cost` and the 641,974-token run.
 
-## 14. Open questions for the team
+## 14. Open questions: provisional answers
 
-1. Per-task cost ceiling for the graph agent, and the per-run default in `[budgets]`.
-2. What comparison switches the LLM subject to `graph` (for example: same verdicts as `deterministic` on
-   all seven tasks, on both tenants, on three separate days, at no more than the `llm` cost)?
-3. After the switch, keep the old `llm` loop as a second baseline, or delete it?
-4. Who owns which phase, and which teammate specifies each test in section 9 so it counts for the
-   brief?
+The answers below are provisional (2026-09-19), set so the work can start. The team can change any of
+them. Cost figures come from the OpenRouter `usage.cost` of the 44 `llm` run records in `runs/` from
+2026-09-18 (Suryodaya; several models were compared that day): refusals cost $0.0003–$0.12, and late
+orders cost $0.016–$0.25, with a median of about $0.04. The highest single run cost $0.28.
+
+1. **Cost ceiling.** `[budgets]` sets a per-task-run budget of $0.25 and a judge budget of $0.05 per
+   task. That is about six times the $0.042 GLM late-order cost in the README and below the highest
+   run seen. A run that hits the budget fails visibly (section 6). Revisit after phase 4 has measured
+   the planner's real cost.
+2. **Switch criteria.** `graph` replaces `llm` as the LLM subject when all of these hold:
+   - Its verdicts equal `deterministic`'s on the six read-only tasks on both tenants, in 3 runs per
+     tenant spread over at least 2 days.
+   - `reschedule_own_draft` passes and restores on Suryodaya in 2 runs. It runs on Keystone too only if
+     Keystone has a draft created by our login.
+   - No `fail`. An `inconclusive` caused by drift or fixture residue is rerun, not counted.
+   - Its median cost per late-order task is at most 1.5 times the `llm` median on the same tenant, and
+     no run exceeds the budget.
+3. **The old loop.** Keep the `llm` subject after the switch as a frozen baseline: bug fixes only, no
+   new features. It shows graph against loop on the same tasks, and it is the fallback if `graph`
+   regresses. Delete it after the capstone is submitted.
+4. **Owners and test specs.** Pravin Gadekar owns every phase until the team assigns owners. Nobody
+   specifies the section 9 tests on the team's behalf: under `CLAUDE.md` each test stays AI-originated
+   until a named teammate adopts its spec. The team picks which ones to adopt before phase 4.
