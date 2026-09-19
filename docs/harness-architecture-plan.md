@@ -424,7 +424,7 @@ a failure of the phase.
 
 | Phase | Work | Exit criterion |
 | --- | --- | --- |
-| 0 | This plan. Fix the stale "scaffold only" section of `CLAUDE.md` (line 41). Commit the `CLAUDE.md` test-authorship change once the team agrees it | Team agrees the plan and the `CLAUDE.md` changes |
+| 0 | This plan. Fix the stale "scaffold only" section of `CLAUDE.md` (done 2026-09-19: now lists what exists and points here). The `CLAUDE.md` test-authorship change is committed (`9d8b00e`) | Team agrees the plan and the `CLAUDE.md` changes |
 | 1 | Untangle: create `answer.py`; remove `agent.main`'s import from `harness.subjects`; one shared page-size constant and one BOM-matching helper for `agent.py` and `investigate.py` (not for `rules.py`) | ruff clean; `deterministic` and `llm` verdicts unchanged on the read-only tasks on Suryodaya |
 | 2 | Config and economics: TOML loader, metered seam with the retry loop inside it, `max_tokens`, ledger in the run record, all under the current `llm` subject | Same verdicts; a run with a tiny budget fails visibly and is persisted; effective config recorded |
 | 2b | Task data to `tasks.jsonl` (harness only; can run beside 3–6) | `deterministic` verdicts unchanged |

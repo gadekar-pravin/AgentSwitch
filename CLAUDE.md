@@ -38,11 +38,15 @@ Team 04 capstone: an agent for seat **Production** (app `manufacturing`) on the 
 platform, driven over MCP, plus a harness that scores it. Target request: "This work order is
 late. Find out why, tell me what it blocks downstream, and reschedule what you can."
 
-Current stage: scaffold only. No agent, MCP client or harness code exists yet. The brief's order
-is domain learning → competitor study → gap report ([docs/gap-report.md](docs/gap-report.md)) →
-agent → harness. The LLM provider is not chosen yet; do not wire one without asking. The instructor
-says the platform's own LLM will be integrated with our pipeline once the harness is ready
-(Release 1 note, 2026-09-17).
+Current stage: the MCP client, read-only investigation, guarded reschedule, LLM agent loop and
+harness exist; [README.md](README.md) lists each with its live-check status. No tests exist yet.
+The LLM agent calls OpenRouter (model from `OPENROUTER_MODEL`, currently `z-ai/glm-5.3-flash`); do
+not change or add a provider without asking. The instructor says the platform's own LLM will be
+integrated with our pipeline once the harness is ready (Release 1 note, 2026-09-17).
+
+Next: [docs/harness-architecture-plan.md](docs/harness-architecture-plan.md) ports the agent and
+harness to the S17Code architecture in phases. It is a draft for team review; do not start phase 1
+or later until the team agrees it.
 
 ## Commands
 
