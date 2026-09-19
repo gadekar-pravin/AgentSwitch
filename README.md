@@ -119,7 +119,8 @@ cost.
 ## Harness
 
 ```bash
-uv run python -m agentswitch.harness --tenant suryodaya --subject llm   # the LLM agent
+uv run python -m agentswitch.harness --tenant suryodaya --subject llm   # the LLM agent (old loop)
+uv run python -m agentswitch.harness --tenant suryodaya --subject graph # the graph agent
 uv run python -m agentswitch.harness --tenant suryodaya            # all tasks
 uv run python -m agentswitch.harness --tenant keystone --task refuse_not_found
 uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_draft --allow-draft-writes
@@ -130,8 +131,16 @@ uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_dr
   material request, subcontract order or job card), one completed order (must be answered "not
   late"), and two refusals (a work order that does not exist; a stock-ledger request outside the
   seat). Targets are picked from live data at run time, so no record ids are committed.
-- Each run record holds the effective config and its hash (`config`) and, for `--subject llm`,
-  the cost ledger (`economics`), also when the run fails.
+- Each run record holds the effective config and its hash (`config`) and, for `--subject llm` and
+  `--subject graph`, the cost ledger (`economics`), also when the run fails. Records are schema
+  2.0; graph runs add the journal, the final graph, accepted and rejected patches, the manifest and
+  the write authority under `subject_output.agent`.
+- Graph runs get six extra audit checks, computed from the persisted record without the agent's
+  own graph code: `journal_consistent` (replaying the journal gives the recorded graph),
+  `capabilities_registered`, `limits_respected`, `terminal_last`, `write_after_target_read` and
+  `single_subject_write`. They can fail a task but never turn a `not_applicable` task into a pass.
+- `--subject graph` has no write authority until phase 6 of the plan: with `--allow-draft-writes`
+  the harness stops with a configuration error before logging in.
 - A seventh task, `reschedule_own_draft`, checks the one write the agent may make: new planned
   dates on a draft work order created by our own login. It runs only with `--allow-draft-writes`
   and scores `not_applicable` otherwise. With the flag, the harness saves the draft to

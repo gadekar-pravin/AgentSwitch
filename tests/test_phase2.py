@@ -45,6 +45,17 @@ run_usd = {run_usd}
 max_attempts_per_round = {attempts_per_round}
 max_attempts_per_run = {attempts_per_run}
 admission_safety_factor = 1.0
+
+[limits]
+max_workers = 1
+replan = "frontier"
+max_new_tasks = 4
+max_nodes = 8
+hard_repairs = 2
+soft_repairs = 1
+page_size = 100
+projection_chars = 1000
+projection_total_chars = 4000
 '''
 
 
@@ -243,6 +254,26 @@ def test_empty_model_override_is_invalid(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_MODEL", "")
 
     with pytest.raises(ConfigError, match="OPENROUTER_MODEL"):
+        load_config(path, env_file=tmp_path / "missing.env")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        ('\n[limits]\n', '\n[not_limits]\n', "config.limits"),
+        ('max_workers = 1\n', 'max_workers = 1\nextra = 1\n', "limits.extra"),
+        ('page_size = 100\n', 'page_size = true\n', "limits.page_size"),
+        ('replan = "frontier"\n', 'replan = "later"\n', "limits.replan"),
+        ('max_workers = 1\n', 'max_workers = 2\n', "phase 5 concurrency safety"),
+    ],
+)
+def test_config_rejects_invalid_limits(tmp_path, monkeypatch, old, new, match):
+    """Spec: AI (Codex) Limits are required, closed, typed, enumerated, and phase-safe."""
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    path = tmp_path / "bad.toml"
+    path.write_text(_toml().replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=match):
         load_config(path, env_file=tmp_path / "missing.env")
 
 

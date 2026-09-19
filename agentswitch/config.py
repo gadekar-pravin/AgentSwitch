@@ -51,11 +51,25 @@ class BudgetConfig:
 
 
 @dataclass(frozen=True)
+class LimitsConfig:
+    max_workers: int
+    replan: str
+    max_new_tasks: int
+    max_nodes: int
+    hard_repairs: int
+    soft_repairs: int
+    page_size: int
+    projection_chars: int
+    projection_total_chars: int
+
+
+@dataclass(frozen=True)
 class Config:
     path: str
     models: ModelConfig
     pricing: PricingConfig
     budgets: BudgetConfig
+    limits: LimitsConfig
     values: dict[str, Any]
     overrides: tuple[dict[str, str], ...]
     sha256: str
@@ -152,7 +166,7 @@ def load_config(
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"cannot load config {selected_path}: {error}") from None
 
-    root = _require_keys(raw, {"models", "pricing", "budgets"}, "config")
+    root = _require_keys(raw, {"models", "pricing", "budgets", "limits"}, "config")
     models_raw = _require_keys(
         root["models"],
         {"agent", "reasoning_effort", "seed", "max_tokens", "timeout_seconds"},
@@ -171,6 +185,21 @@ def load_config(
             "admission_safety_factor",
         },
         "budgets",
+    )
+    limits_raw = _require_keys(
+        root["limits"],
+        {
+            "max_workers",
+            "replan",
+            "max_new_tasks",
+            "max_nodes",
+            "hard_repairs",
+            "soft_repairs",
+            "page_size",
+            "projection_chars",
+            "projection_total_chars",
+        },
+        "limits",
     )
 
     agent = _string(models_raw["agent"], "models.agent")
@@ -228,6 +257,45 @@ def load_config(
             inclusive=True,
         ),
     )
+    max_workers = _integer(limits_raw["max_workers"], "limits.max_workers", minimum=1)
+    if max_workers > 1:
+        raise ConfigError("limits.max_workers above 1 needs phase 5 concurrency safety")
+    replan = _string(limits_raw["replan"], "limits.replan")
+    if replan not in {"frontier", "node"}:
+        raise ConfigError('limits.replan must be one of "frontier" or "node"')
+    max_new_tasks = _integer(
+        limits_raw["max_new_tasks"], "limits.max_new_tasks", minimum=1
+    )
+    max_nodes = _integer(limits_raw["max_nodes"], "limits.max_nodes", minimum=1)
+    if max_nodes < max_new_tasks:
+        raise ConfigError("limits.max_nodes must be at least limits.max_new_tasks")
+    projection_chars = _integer(
+        limits_raw["projection_chars"], "limits.projection_chars", minimum=1
+    )
+    projection_total_chars = _integer(
+        limits_raw["projection_total_chars"],
+        "limits.projection_total_chars",
+        minimum=1,
+    )
+    if projection_total_chars < projection_chars:
+        raise ConfigError(
+            "limits.projection_total_chars must be at least limits.projection_chars"
+        )
+    limits = LimitsConfig(
+        max_workers=max_workers,
+        replan=replan,
+        max_new_tasks=max_new_tasks,
+        max_nodes=max_nodes,
+        hard_repairs=_integer(
+            limits_raw["hard_repairs"], "limits.hard_repairs", minimum=0
+        ),
+        soft_repairs=_integer(
+            limits_raw["soft_repairs"], "limits.soft_repairs", minimum=0
+        ),
+        page_size=_integer(limits_raw["page_size"], "limits.page_size", minimum=1),
+        projection_chars=projection_chars,
+        projection_total_chars=projection_total_chars,
+    )
     values = {
         "models": {
             "agent": models.agent,
@@ -255,6 +323,17 @@ def load_config(
             "max_attempts_per_run": budgets.max_attempts_per_run,
             "admission_safety_factor": budgets.admission_safety_factor,
         },
+        "limits": {
+            "max_workers": limits.max_workers,
+            "replan": limits.replan,
+            "max_new_tasks": limits.max_new_tasks,
+            "max_nodes": limits.max_nodes,
+            "hard_repairs": limits.hard_repairs,
+            "soft_repairs": limits.soft_repairs,
+            "page_size": limits.page_size,
+            "projection_chars": limits.projection_chars,
+            "projection_total_chars": limits.projection_total_chars,
+        },
     }
     canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode()).hexdigest()
@@ -263,6 +342,7 @@ def load_config(
         models=models,
         pricing=pricing,
         budgets=budgets,
+        limits=limits,
         values=values,
         overrides=tuple(overrides),
         sha256=digest,
@@ -274,6 +354,7 @@ __all__ = [
     "Config",
     "ConfigError",
     "DEFAULT_CONFIG_PATH",
+    "LimitsConfig",
     "ModelConfig",
     "PricingConfig",
     "PricingRate",

@@ -3,7 +3,9 @@ name = "agentswitch"
 version = "0.1.0"
 description = "Seat 04 Production agent and harness for the AgentSwitch capstone"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "networkx>=3.6.1",
+]
 
 [dependency-groups]
 dev = [
