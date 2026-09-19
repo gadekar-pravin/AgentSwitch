@@ -219,6 +219,63 @@ def test_other_node_running_during_reschedule_is_detected() -> None:
     assert any("reschedule node" in failure for failure in result["failures"])
 
 
+def test_read_started_while_answer_is_running_is_detected() -> None:
+    """Spec: AI (Codex). No node may start after an answer starts running."""
+    record = _record()
+    nodes = record["subject_output"]["agent"]["graph"]["nodes"]
+    nodes.append(
+        {
+            "id": "late_read",
+            "capability": "Item.get",
+            "arguments": {"id": "ITEM-1"},
+            "state": "succeeded",
+            "frontier": 3,
+        }
+    )
+    journal = record["subject_output"]["agent"]["journal"]
+    journal[-1:] = [
+        _event(7, "task_started", "late_read", 225),
+        _event(8, "task_succeeded", "answer", 230),
+        _event(9, "task_succeeded", "late_read", 240),
+    ]
+
+    result = check_record(record)
+
+    assert result["status"] == "fail"
+    assert "node 'late_read' started after answer node 'answer' started" in result[
+        "failures"
+    ]
+
+
+def test_read_started_after_answer_finished_is_detected() -> None:
+    """Spec: AI (Codex). Answer completion does not reopen graph execution."""
+    record = _record()
+    nodes = record["subject_output"]["agent"]["graph"]["nodes"]
+    nodes.append(
+        {
+            "id": "late_read",
+            "capability": "Item.get",
+            "arguments": {"id": "ITEM-1"},
+            "state": "succeeded",
+            "frontier": 3,
+        }
+    )
+    journal = record["subject_output"]["agent"]["journal"]
+    journal.extend(
+        [
+            _event(8, "task_started", "late_read", 240),
+            _event(9, "task_succeeded", "late_read", 250),
+        ]
+    )
+
+    result = check_record(record)
+
+    assert result["status"] == "fail"
+    assert "node 'late_read' started after answer node 'answer' started" in result[
+        "failures"
+    ]
+
+
 def test_call_attributed_to_answer_is_detected() -> None:
     """Spec: AI (Codex). Terminal answer nodes may not issue tool calls."""
     record = _record()
