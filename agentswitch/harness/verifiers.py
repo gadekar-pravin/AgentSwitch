@@ -1424,10 +1424,8 @@ def _observed_consumer_state(
     bom_versions = observations.get(("BOM", bom_id), [])
     if bom_versions:
         matches = [_bom_contains_item(bom, item_id) for bom in bom_versions]
-        if all(matches):
-            return True
         if any(matches):
-            return None
+            return True
         return False
     if fresh_bom_state != "ok":
         return None
@@ -1572,13 +1570,32 @@ def downstream_complete(
                         "reason": "a subject-observed potential consumer was omitted",
                     }
                 )
-            elif any(state is True for state in states) or any(state is None for state in states):
+            elif any(state is None for state in states) or (
+                any(state is True for state in states)
+                and any(
+                    state is False
+                    and (
+                        json_equal(version.get("id"), target_id)
+                        or version.get("status") not in POTENTIAL_CONSUMER_STATES
+                    )
+                    for version, state in zip(versions, states, strict=True)
+                )
+            ):
                 findings.append(
                     {
                         **candidate,
                         "branch": "observed_consumer_drift",
                         "verdict": "inconclusive",
                         "reason": "drift: consumer status or BOM changed during observation",
+                    }
+                )
+            elif any(state is True for state in states):
+                findings.append(
+                    {
+                        **candidate,
+                        "branch": "observed_consumer_omitted",
+                        "verdict": "fail",
+                        "reason": "a subject-observed potential consumer was omitted",
                     }
                 )
             else:
@@ -1627,27 +1644,19 @@ def downstream_complete(
         mismatched_bom_ids = {
             bom_id
             for bom_id, matches in bom_observation_states.items()
-            if matches and not all(matches)
+            if matches and not any(matches)
         }
         later_bom_ids = {
             bom_id
             for bom_id, matches in bom_observation_states.items()
             if not matches and bom_scan_state == "complete"
         }
-        if mismatched_bom_ids or later_bom_ids:
-            mixed_bom_ids = {
-                bom_id
-                for bom_id, matches in bom_observation_states.items()
-                if any(matches) and not all(matches)
-            }
+        observed_matching_bom = any(any(matches) for matches in bom_observation_states.values())
+        if not observed_matching_bom and (mismatched_bom_ids or later_bom_ids):
             findings.append(
                 {
                     **candidate,
-                    "branch": (
-                        "observed_bom_drift"
-                        if mixed_bom_ids
-                        else "bom_matched_after_subject_observation"
-                    ),
+                    "branch": "bom_matched_after_subject_observation",
                     "verdict": "inconclusive",
                     "reason": "drift: consumer BOM did not contain the target item when the subject read it",
                 }
