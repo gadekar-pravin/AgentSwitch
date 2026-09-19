@@ -161,7 +161,7 @@ Python validates every patch:
   not added again. The planner is told which existing node already covers it and that node's outcome. A
   patch whose additions are all duplicates is a soft repair (5.3). A failed node is never treated as a
   duplicate, so the model may propose that read again; the executor never repeats a call on its own;
-- `answer` must be the only addition in its patch, and nothing may be added after it;
+- `answer` must be the only addition in its patch, and nothing may be added after it. It takes no dependencies: it starts only when nothing is pending or running, so any `depends_on` it names is dropped rather than rejected (changed 2026-09-19 after the phase 4 exit runs, where rejecting an `answer` that named the failed target read cost refusals up to 4 of 5 hard repairs);
 - an empty patch while nothing is pending or running is a hard repair.
 
 ### 5.3 Critic and repairs

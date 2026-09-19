@@ -216,7 +216,8 @@ class OpenRouterClient:
             if self._api_key:
                 rendered = rendered.replace(self._api_key, "<redacted>")
             raise _with_usage(
-                OpenRouterError(f"OpenRouter choice error: {rendered[:300]}"), response
+                OpenRouterRetryable(f"OpenRouter choice error: {rendered[:300]}"),
+                response,
             )
         message = choice.get("message")
         if not isinstance(message, dict):

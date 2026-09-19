@@ -81,6 +81,15 @@ def _success(*, usage=None, model: str = "returned/model") -> bytes:
     return json.dumps(response).encode()
 
 
+def _choice_error(*, usage=None) -> bytes:
+    response = {
+        "choices": [{"finish_reason": "error", "error": {"message": "provider failed"}}]
+    }
+    if usage is not None:
+        response["usage"] = usage
+    return json.dumps(response).encode()
+
+
 class ScriptedTransport:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
@@ -125,6 +134,50 @@ def test_retry_429_then_success_is_metered(tmp_path, monkeypatch):
     entries = client.ledger()["entries"]
     assert [entry["status"] for entry in entries] == ["charged_reservation", "charged"]
     assert [entry["outcome"] for entry in entries] == ["retryable_error", "ok"]
+
+
+def test_choice_error_then_success_retries_and_charges_both_attempts(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex) A provider choice error is charged and retried in one round."""
+    config = _config(tmp_path, monkeypatch)
+    transport = ScriptedTransport(
+        [
+            (200, _choice_error(usage={"cost": 0.000004})),
+            (200, _success(usage={"cost": 0.000005})),
+        ]
+    )
+    client = MeteredClient(_raw(config, transport), config, sleep=lambda _: None)
+
+    result = client.chat([{"role": "user", "content": "hello"}])
+
+    assert result["message"]["content"] == "done"
+    entries = client.ledger()["entries"]
+    assert [(entry["round"], entry["attempt"]) for entry in entries] == [(1, 1), (1, 2)]
+    assert [entry["status"] for entry in entries] == ["charged", "charged"]
+    assert [entry["outcome"] for entry in entries] == ["retryable_error", "ok"]
+    assert [entry["charged_micro"] for entry in entries] == [4, 5]
+
+
+def test_choice_errors_exhaust_per_round_attempts(tmp_path, monkeypatch):
+    """Spec: AI (Codex) Choice errors propagate after every permitted attempt is charged."""
+    config = _config(tmp_path, monkeypatch)
+    transport = ScriptedTransport(
+        [(200, _choice_error(usage={"cost": 0.000004})) for _ in range(3)]
+    )
+    client = MeteredClient(_raw(config, transport), config, sleep=lambda _: None)
+
+    with pytest.raises(OpenRouterError, match="OpenRouter choice error"):
+        client.chat([{"role": "user", "content": "hello"}])
+
+    entries = client.ledger()["entries"]
+    assert [(entry["round"], entry["attempt"]) for entry in entries] == [
+        (1, 1),
+        (1, 2),
+        (1, 3),
+    ]
+    assert all(entry["status"] == "charged" for entry in entries)
+    assert all(entry["outcome"] == "retryable_error" for entry in entries)
 
 
 def test_three_network_failures_exhaust_retries(tmp_path, monkeypatch):
