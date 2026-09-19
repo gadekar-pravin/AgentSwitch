@@ -116,6 +116,23 @@ the completed order and the late order with causes:
 `google/gemini-3.8-flash` passed 4/4 in an earlier run at $0.25 per late order and was dropped on
 cost.
 
+Graph agent against the old loop, early figures (2026-09-19, Suryodaya, GLM-5.3-flash, one run
+each; OpenRouter's reported cost). The old loop's six read-only tasks cost about $0.12 in total.
+The graph agent's first runs cost less on every task measured so far, roughly 2–3 times less
+overall. These are single runs; the phase 4 exit runs (3 per tenant) will replace them.
+
+| Task | Old loop (`llm`) | Graph agent (`graph`) |
+| --- | --- | --- |
+| late_open_oldest | $0.036 | $0.020 |
+| late_with_sales_order | $0.032 | $0.005 |
+| late_with_cause | $0.027 | $0.009 |
+| not_late_completed | $0.012 | not yet run |
+| refuse_not_found | $0.009 | not yet run |
+| refuse_outside_seat | $0.0003 | $0.0006 |
+
+The graph agent is slower per task: most of its time is the model's final planning round (one
+late-order run took almost 10 minutes, of which MCP reads were 33 seconds).
+
 ## Harness
 
 ```bash
