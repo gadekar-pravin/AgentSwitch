@@ -508,6 +508,31 @@ def test_answer_while_node_is_pending_is_hard_repair():
     assert "no node is pending or running" in decision.message
 
 
+def test_answer_dependency_on_failed_node_is_dropped_without_repair():
+    """Spec: AI (Codex) A failed dependency is removed from an accepted answer node."""
+    graph = _failed_target({"error": {"type": "not_found"}})
+    answer = _answer(outcome="refused", refusal_reason="not_found")
+    answer["depends_on"] = ["target"]
+
+    decision, _transport = _planner_call(_response(_patch([answer])), graph=graph)
+
+    assert decision.accepted is True
+    assert decision.patch.add[0].depends_on == ()
+    assert decision.state == PlannerState.from_limits(_limits())
+
+
+def test_answer_dependency_on_missing_node_is_dropped_without_repair():
+    """Spec: AI (Codex) A missing dependency is removed from an accepted answer node."""
+    answer = _answer(outcome="refused", refusal_reason="not_found")
+    answer["depends_on"] = ["missing"]
+
+    decision, _transport = _planner_call(_response(_patch([answer])))
+
+    assert decision.accepted is True
+    assert decision.patch.add[0].depends_on == ()
+    assert decision.state == PlannerState.from_limits(_limits())
+
+
 def test_same_patch_dependency_is_discarded_for_next_round():
     """Spec: AI (Codex) A same-patch child is discarded without spending a repair."""
     reply = _response(

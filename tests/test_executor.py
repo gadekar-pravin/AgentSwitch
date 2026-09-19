@@ -675,7 +675,16 @@ def test_failed_target_read_not_found_detail_reaches_next_planner_request(
     config = _config(tmp_path, monkeypatch)
     responses = [
         _response(_target_patch()),
-        _response(_patch([_answer(outcome="refused", refusal_reason="not_found")])),
+        _response(
+            _patch(
+                [
+                    {
+                        **_answer(outcome="refused", refusal_reason="not_found"),
+                        "depends_on": ["target"],
+                    }
+                ]
+            )
+        ),
     ]
     tools, _, llm, llm_transport = _clients(
         config,
@@ -687,6 +696,8 @@ def test_failed_target_read_not_found_detail_reaches_next_planner_request(
     target = _planner_payload(llm_transport, 1)["nodes"][0]
 
     assert result["refusal_reason"] == "not_found"
+    assert result["planner"]["hard_repairs_used"] == 0
+    assert {"source": "target", "target": "answer"} not in result["graph"]["edges"]
     assert target["state"] == "failed"
     assert '"type":"not_found"' in target["error_projection"]
     assert f"WorkOrder.get id '{TARGET}' not found" in target["error_projection"]

@@ -66,7 +66,7 @@ SYSTEM_MESSAGE = """You are the Production-seat planner for the manufacturing ap
 Return exactly one plan_frontier function call. Each call proposes one graph patch; code, not you, executes it.
 Use only the canonical capabilities listed in the manifest. Arguments must exactly match that capability's schema.
 Every depends_on id must already exist in the graph. Never depend on a node proposed in the same patch; propose that child again in the next round after its parent exists.
-The answer capability must be the only addition in its patch, and propose it only when no node is pending or running. The patch finish flag does not finish the run; only a succeeded answer node does.
+The answer capability takes no dependencies: propose it with an empty depends_on list once everything needed has settled. It must be the only addition in its patch, and may be proposed only when no node is pending or running. The patch finish flag does not finish the run; only a succeeded answer node does.
 A failed read may be proposed again. List reads are paged to completion by code, so provide only real filters. Never use empty or :placeholder filter values.
 A failed read's error type identifies the fitting refusal: not_found on the target read means the target does not exist; transport or permission failures mean the source is unavailable.
 Use reschedule_work_order only for the supplied target and at most once. It returns a proposal because writes are not permitted.
@@ -707,18 +707,19 @@ def validate_patch(
             arguments = validate(capability, spec.arguments)
         except CapabilityArgumentError as error:
             return _hard(f"node {spec.id!r} has invalid arguments: {error}")
+        dependencies = () if spec.capability == "answer" else spec.depends_on
         validated = NodeSpec(
             id=spec.id,
             capability=spec.capability,
             arguments=arguments,
-            depends_on=spec.depends_on,
+            depends_on=dependencies,
         )
-        if len(spec.depends_on) != len(set(spec.depends_on)):
+        if len(dependencies) != len(set(dependencies)):
             return _hard(f"node {spec.id!r} has duplicate dependencies")
-        same_patch = [parent for parent in spec.depends_on if parent in proposed_ids]
+        same_patch = [parent for parent in dependencies if parent in proposed_ids]
         other_missing = [
             parent
-            for parent in spec.depends_on
+            for parent in dependencies
             if parent not in proposed_ids and parent not in by_id
         ]
         if other_missing:
@@ -727,7 +728,7 @@ def validate_patch(
             )
         failed = [
             parent
-            for parent in spec.depends_on
+            for parent in dependencies
             if parent in by_id and by_id[parent].state == "failed"
         ]
         if failed:

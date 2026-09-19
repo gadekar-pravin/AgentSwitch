@@ -41,6 +41,7 @@ from agentswitch.offline import (
 
 TODAY = date(2026, 9, 19)
 TARGET = "WO-HARNESS"
+RELATED = "WO-RELATED"
 USER = "offline-user"
 
 
@@ -72,6 +73,11 @@ TARGET_RECORD = {
     "planned_end_date": "2026-09-03",
     "qty": 10,
     "produced_qty": 0,
+}
+RELATED_RECORD = {
+    **TARGET_RECORD,
+    "id": RELATED,
+    "number": RELATED,
 }
 
 
@@ -126,18 +132,28 @@ def _real_agent_record(
     config = _config(tmp_path, monkeypatch)
     mcp_transport = OfflineMcpTransport(
         CATALOGUE,
-        {"WorkOrder": [TARGET_RECORD]},
+        {"WorkOrder": [TARGET_RECORD, RELATED_RECORD]},
     )
     tools = McpClient(
         "https://offline.invalid",
         "offline-token",
         transport=mcp_transport,
     )
-    answer = _answer_addition(depends_on=["target"])
+    answer = _answer_addition()
     raw_llm, _ = offline_llm_client(
         config,
         [
             _response([_addition("target", "WorkOrder.get", {"id": TARGET})]),
+            _response(
+                [
+                    _addition(
+                        "related",
+                        "WorkOrder.get",
+                        {"id": RELATED},
+                        depends_on=["target"],
+                    )
+                ]
+            ),
             _response([answer]),
             _response([answer]),
             _response([answer]),
