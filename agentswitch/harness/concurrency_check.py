@@ -137,6 +137,7 @@ def _replay_gates(
     maximum = 0
     failures: list[str] = []
     worker_limit_reported = False
+    started_answer: str | None = None
     for event in journal:
         node_id = event.get("node")
         if not isinstance(node_id, str):
@@ -144,6 +145,11 @@ def _replay_gates(
         event_type = event.get("type")
         if event_type == "task_started":
             capability = nodes.get(node_id, {}).get("capability")
+            if started_answer is not None and node_id != started_answer:
+                failures.append(
+                    f"node {node_id!r} started after answer node "
+                    f"{started_answer!r} started"
+                )
             others = sorted(running - {node_id})
             running_reschedules = sorted(
                 running_id
@@ -164,6 +170,8 @@ def _replay_gates(
                 failures.append(
                     f"answer node {node_id!r} started while other nodes were running"
                 )
+            if capability == "answer" and started_answer is None:
+                started_answer = node_id
             running.add(node_id)
             maximum = max(maximum, len(running))
             if (
