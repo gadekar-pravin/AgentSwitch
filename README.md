@@ -84,8 +84,13 @@ downstream) from the records the model actually read, using the same rules as `i
   created by our login. From the command line it writes only with `--allow-draft-writes`.
 - If the answer misses a required read, the agent gets one repair message naming the exact calls
   still needed. Reads still missing after that become unknowns in the answer.
-- Model calls go through OpenRouter with `data_collection: "deny"`. `OPENROUTER_API_KEY` and
-  `OPENROUTER_MODEL` are set in `.env`.
+- Model calls go through OpenRouter with `data_collection: "deny"`. `OPENROUTER_API_KEY` is set in
+  `.env`. The model, `max_tokens`, prices and the per-run budget are in
+  [config/agentswitch.toml](config/agentswitch.toml); `OPENROUTER_MODEL` in the environment or `.env`
+  overrides the model. Use `--config <path>` for another file.
+- Every model attempt is admitted against the budget ($0.25 per task run), then charged from
+  OpenRouter's reported cost. A call the budget cannot cover is refused before it is sent, and the
+  run fails. Retries count as attempts.
 - GLM is served by a third-party host (Parasail), not Z.ai. Live tenant data in tool results goes to
   that host.
 
@@ -118,6 +123,8 @@ uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_dr
   material request, subcontract order or job card), one completed order (must be answered "not
   late"), and two refusals (a work order that does not exist; a stock-ledger request outside the
   seat). Targets are picked from live data at run time, so no record ids are committed.
+- Each run record holds the effective config and its hash (`config`) and, for `--subject llm`,
+  the cost ledger (`economics`), also when the run fails.
 - A seventh task, `reschedule_own_draft`, checks the one write the agent may make: new planned
   dates on a draft work order created by our own login. It runs only with `--allow-draft-writes`
   and scores `not_applicable` otherwise. With the flag, the harness saves the draft to

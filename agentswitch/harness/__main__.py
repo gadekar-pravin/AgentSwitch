@@ -6,6 +6,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from agentswitch.config import DEFAULT_CONFIG_PATH
+
 from .runner import (
     HarnessConfigurationError,
     HarnessLoginError,
@@ -43,6 +45,12 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable the owned-draft reschedule fixture and scoped subject write",
     )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="runtime TOML configuration path",
+    )
     return parser
 
 
@@ -77,6 +85,7 @@ def main() -> int:
             today=args.today,
             allow_draft_writes=args.allow_draft_writes,
             subject=args.subject,
+            config_file=args.config,
         )
     except HarnessConfigurationError as error:
         failures = _exception_failed_restores(error)

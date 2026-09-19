@@ -1,0 +1,32 @@
+# AgentSwitch agent and harness configuration (plan: docs/harness-architecture-plan.md, section 8).
+# Loaded and validated at start; a missing key, unknown key or wrong type is a configuration error.
+# Secrets stay in .env. Only OPENROUTER_MODEL may override a value here (it replaces models.agent).
+
+[models]
+agent = "z-ai/glm-5.3-flash"
+reasoning_effort = "medium"
+seed = 4042026
+# Largest completion seen in runs/ is 7,776 tokens (reasoning included); 16,384 leaves 2x headroom.
+max_tokens = 16384
+timeout_seconds = 180.0
+
+# Dollars per million tokens. The default row applies to any model not listed, so an unknown
+# model is never free. It is a deliberately high guard, not a real price.
+[pricing.default]
+input_usd_per_million = 1.0
+output_usd_per_million = 5.0
+
+# OpenRouter list price, checked 2026-09-19.
+[pricing.models."z-ai/glm-5.3-flash"]
+input_usd_per_million = 0.09
+output_usd_per_million = 0.30
+
+[budgets]
+# Per task run; plan section 14, answer 1.
+run_usd = 0.25
+# One round is one model call from the agent loop; retries are extra attempts in that round.
+# 3 per round keeps today's two retries; 90 per run is 30 turns x 3.
+max_attempts_per_round = 3
+max_attempts_per_run = 90
+# Multiplies the character-based input-token estimate before admission.
+admission_safety_factor = 1.25

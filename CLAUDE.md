@@ -39,14 +39,15 @@ platform, driven over MCP, plus a harness that scores it. Target request: "This 
 late. Find out why, tell me what it blocks downstream, and reschedule what you can."
 
 Current stage: the MCP client, read-only investigation, guarded reschedule, LLM agent loop and
-harness exist; [README.md](README.md) lists each with its live-check status. No tests exist yet.
-The LLM agent calls OpenRouter (model from `OPENROUTER_MODEL`, currently `z-ai/glm-5.3-flash`); do
-not change or add a provider without asking. The instructor says the platform's own LLM will be
-integrated with our pipeline once the harness is ready (Release 1 note, 2026-09-17).
+harness exist; [README.md](README.md) lists each with its live-check status. The only tests are
+AI-originated (`Spec: AI`). The LLM agent calls OpenRouter (model in `config/agentswitch.toml`,
+currently `z-ai/glm-5.3-flash`; `OPENROUTER_MODEL` overrides it); do not change or add a provider
+without asking. The instructor says the platform's own LLM will be integrated with our pipeline
+once the harness is ready (Release 1 note, 2026-09-17).
 
 Next: [docs/harness-architecture-plan.md](docs/harness-architecture-plan.md) ports the agent and
-harness to the S17Code architecture in phases. The team agreed it on 2026-09-19; phase 1 is done.
-Follow the plan's phase order.
+harness to the S17Code architecture in phases. The team agreed it on 2026-09-19; phases 1 and 2
+are done. Follow the plan's phase order.
 
 ## Commands
 
@@ -55,7 +56,7 @@ Follow the plan's phase order.
 ```bash
 uv sync
 uv run ruff check .
-uv run pytest        # exits 5 until the first test exists
+uv run pytest
 ```
 
 ## Tests: AI writes the code; what counts is who specified the test

@@ -6,9 +6,10 @@ import argparse
 import copy
 import json
 from datetime import date
+from pathlib import Path
 from typing import Any
 
-from . import mcp_client
+from . import config, economics, llm_client, mcp_client
 from .answer import (
     Store,
     build_raw,
@@ -19,7 +20,6 @@ from .answer import (
     refusal,
 )
 from .investigate import PAGE_LIMIT
-from .llm_client import from_env as llm_from_env
 from .mcp_client import (
     ArgumentError,
     InvalidParams,
@@ -1113,6 +1113,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--request")
     parser.add_argument("--today", type=_date_argument, default=date.today())
     parser.add_argument("--allow-draft-writes", action="store_true")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=config.DEFAULT_CONFIG_PATH,
+        help="runtime TOML configuration path",
+    )
     return parser
 
 
@@ -1121,8 +1127,16 @@ def main() -> int:
     args = parser.parse_args()
     if args.allow_draft_writes and args.today != date.today():
         parser.error("--allow-draft-writes requires --today to equal the system date")
+    try:
+        resolved_config = config.load_config(args.config, env_file=".env")
+    except config.ConfigError as error:
+        parser.error(str(error))
+    try:
+        raw_llm = llm_client.from_config(resolved_config, env_file=".env")
+    except ValueError as error:
+        parser.error(str(error))
     client = mcp_client.from_env(args.tenant)
-    llm = llm_from_env()
+    llm = economics.MeteredClient(raw_llm, resolved_config)
     request = args.request or (
         "This work order is late. Find out why, tell me what it blocks downstream, "
         "and reschedule what you can."
@@ -1150,6 +1164,14 @@ def main() -> int:
         f"prompt_tokens={totals.get('prompt_tokens', 0)} "
         f"completion_tokens={totals.get('completion_tokens', 0)} "
         f"total_tokens={totals.get('total_tokens', 0)} cost={totals.get('cost', 0)}"
+    )
+    summary = llm.ledger()["summary"]
+    print(
+        "economics: "
+        f"budget_usd={summary['budget_micro'] / 1_000_000:.6f} "
+        f"spent_usd={summary['spent_micro'] / 1_000_000:.6f} "
+        f"remaining_usd={summary['remaining_micro'] / 1_000_000:.6f} "
+        f"attempts={summary['attempts']} refused={summary['refused']}"
     )
     return 0
 
