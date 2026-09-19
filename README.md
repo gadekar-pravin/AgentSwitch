@@ -21,8 +21,9 @@ The request our agent must handle:
 | MCP client | [agentswitch/mcp_client.py](agentswitch/mcp_client.py) | done (2026-09-18); read-only live check on Suryodaya; no hand-written tests yet |
 | Investigation steps (read-only: lateness, cause candidates, downstream) | [agentswitch/investigate.py](agentswitch/investigate.py) | done (2026-09-18); read-only live checks on both tenants; no hand-written tests yet |
 | Reschedule step | [agentswitch/reschedule.py](agentswitch/reschedule.py) | done (2026-09-18); writes only a draft created by our login (planned dates only), escalates everything else with a proposed date; live write check on our own Suryodaya draft, restored |
-| Agent (LLM loop) | [agentswitch/agent.py](agentswitch/agent.py), [agentswitch/llm_client.py](agentswitch/llm_client.py) | done (2026-09-18); model `z-ai/glm-5.3-flash` via OpenRouter; 4/4 of the tested read-only tasks on Suryodaya (one run); write task and Keystone not yet run with it; no hand-written tests yet |
-| Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | [agentswitch/harness/](agentswitch/harness/) | done (2026-09-18); scores the LLM agent (`--subject llm`) or the deterministic `investigate()` + `reschedule()` adapter (default); deterministic: 6/6 read-only tasks on both tenants, write task passed live on Suryodaya; no hand-written tests yet |
+| Agent (graph; the LLM agent) | [agentswitch/executor.py](agentswitch/executor.py), [agentswitch/planner.py](agentswitch/planner.py), [agentswitch/graph.py](agentswitch/graph.py), [agentswitch/reads.py](agentswitch/reads.py); CLI in [agentswitch/agent.py](agentswitch/agent.py) | done (2026-09-19); model `z-ai/glm-5.3-flash` via OpenRouter; six read-only tasks on both tenants and the draft write on Suryodaya (see Harness); read-only from the CLI; no hand-written tests yet |
+| Old loop (frozen baseline) | `run_agent` in [agentswitch/agent.py](agentswitch/agent.py) | done (2026-09-18); kept for comparison as `--subject llm` and `--loop`; bug fixes only; deleted after submission |
+| Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | [agentswitch/harness/](agentswitch/harness/) | done (2026-09-18); scores the graph agent (`--subject graph`), the old loop (`--subject llm`) or the deterministic `investigate()` + `reschedule()` adapter (default); deterministic: 6/6 read-only tasks on both tenants, write task passed live on Suryodaya; no hand-written tests yet |
 | Human-specified tests (a teammate specifies each test; AI writes the code; AI-originated tests score zero) | `tests/` (create when writing the first test) | none yet |
 
 Order follows the brief: learn the domain, study a leading product, write the
@@ -73,9 +74,38 @@ listed in [docs/domain-notes.md](docs/domain-notes.md#bug-reports-filed).
 
 ## Agent
 
-The agent answers one request about one work order. The model chooses which records to read and
-whether to refuse, reschedule or finish. Code builds the scored answer (lateness, causes,
-downstream) from the records the model actually read, using the same rules as `investigate()`.
+The agent answers one request about one work order. It is the graph agent: each round the model
+(the planner) returns a patch that adds read nodes, the reschedule or the final `answer` to a graph;
+code validates every patch against the seat's capabilities, runs ready reads (up to four at once),
+and shows the planner bounded results for the next round. A code critic checks the answer against
+the reads the request needs and names any that are missing. Code builds the scored answer
+(lateness, causes, downstream) from the records actually read, using the same rules as
+`investigate()`.
+
+```bash
+uv run python -m agentswitch.agent --tenant suryodaya --work-order <id>          # graph agent, read-only
+uv run python -m agentswitch.agent --tenant suryodaya --work-order <id> --loop   # old loop
+```
+
+- From the command line the graph agent never writes: `reschedule_work_order` returns a proposal
+  with new dates. `--allow-draft-writes` needs `--loop`; the graph agent's one write runs only in the
+  harness (`--subject graph --task reschedule_own_draft --allow-draft-writes`), which saves the draft
+  first, writes a receipt before the update and restores the dates afterwards.
+- Model calls go through OpenRouter with `data_collection: "deny"`. `OPENROUTER_API_KEY` is set in
+  `.env`. The model, `max_tokens`, prices, the per-run budget and the graph limits are in
+  [config/agentswitch.toml](config/agentswitch.toml); `OPENROUTER_MODEL` in the environment or `.env`
+  overrides the model. Use `--config <path>` for another file.
+- Every model attempt is admitted against the budget ($0.25 per task run), then charged from
+  OpenRouter's reported cost. A call the budget cannot cover is refused before it is sent, and the
+  run fails. Retries count as attempts.
+- GLM is served by a third-party host (Parasail), not Z.ai. Live tenant data in tool results goes to
+  that host.
+
+### Old loop (frozen baseline)
+
+`--loop` and `--subject llm` run the first LLM agent, a native tool-calling loop. It is kept for
+comparison and as a fallback: bug fixes only, no new features, deleted after the capstone is
+submitted.
 
 - The model sees 14 read-only tools from the seat's `tools/list`, plus two local actions:
   `reschedule_work_order` and `finish`. Each list tool offers only the filters that tool needs, and
@@ -87,22 +117,9 @@ downstream) from the records the model actually read, using the same rules as `i
   Values are never trimmed or defaulted. A seat tool whose schema uses a construct the check does not
   support is left off the menu and listed under `manifest.dropped` in the run record.
 - The only write is `reschedule_work_order`, which runs `reschedule()`: planned dates on a draft
-  created by our login. From the command line it writes only with `--allow-draft-writes`.
+  created by our login. From the command line it writes only with `--loop --allow-draft-writes`.
 - If the answer misses a required read, the agent gets one repair message naming the exact calls
   still needed. Reads still missing after that become unknowns in the answer.
-- Model calls go through OpenRouter with `data_collection: "deny"`. `OPENROUTER_API_KEY` is set in
-  `.env`. The model, `max_tokens`, prices and the per-run budget are in
-  [config/agentswitch.toml](config/agentswitch.toml); `OPENROUTER_MODEL` in the environment or `.env`
-  overrides the model. Use `--config <path>` for another file.
-- Every model attempt is admitted against the budget ($0.25 per task run), then charged from
-  OpenRouter's reported cost. A call the budget cannot cover is refused before it is sent, and the
-  run fails. Retries count as attempts.
-- GLM is served by a third-party host (Parasail), not Z.ai. Live tenant data in tool results goes to
-  that host.
-
-```bash
-uv run python -m agentswitch.agent --tenant suryodaya --work-order <id>
-```
 
 Model comparison, 2026-09-18, Suryodaya, one run each. The four read-only tasks were two refusals,
 the completed order and the late order with causes:

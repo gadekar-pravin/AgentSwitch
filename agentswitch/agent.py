@@ -1,4 +1,4 @@
-"""LLM-directed, MCP-observed production investigation agent."""
+"""Graph-agent CLI by default; ``--loop`` runs the old frozen baseline."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import config, economics, llm_client, mcp_client
+from . import config, economics, executor, llm_client, mcp_client
 from .answer import (
     Store,
     build_raw,
@@ -200,7 +200,12 @@ def run_agent(
     allow_write: bool,
     max_turns: int = 30,
 ) -> dict[str, Any]:
-    """Run the bounded native-tool loop and classify only agent-read records."""
+    (
+        """Run the bounded native-tool loop and classify only agent-read records.
+
+        Frozen baseline since phase 8: bug fixes only, no new features; delete after """
+        "the capstone is submitted."
+    )
     if max_turns < 1:
         raise ValueError("max_turns must be positive")
     transcript: list[dict[str, Any]] = []
@@ -672,6 +677,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-order", required=True)
     parser.add_argument("--request")
     parser.add_argument("--today", type=_date_argument, default=date.today())
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="run the old loop, the frozen baseline",
+    )
     parser.add_argument("--allow-draft-writes", action="store_true")
     parser.add_argument(
         "--config",
@@ -685,7 +695,13 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
-    if args.allow_draft_writes and args.today != date.today():
+    if args.allow_draft_writes and not args.loop:
+        parser.error(
+            "--allow-draft-writes requires the graph harness command: "
+            "uv run python -m agentswitch.harness --subject graph "
+            "--task reschedule_own_draft --allow-draft-writes"
+        )
+    if args.loop and args.allow_draft_writes and args.today != date.today():
         parser.error("--allow-draft-writes requires --today to equal the system date")
     try:
         resolved_config = config.load_config(args.config, env_file=".env")
@@ -701,15 +717,29 @@ def main() -> int:
         "This work order is late. Find out why, tell me what it blocks downstream, "
         "and reschedule what you can."
     )
-    result = run_agent(
-        client,
-        llm,
-        request=request,
-        target_id=args.work_order,
-        today=args.today,
-        own_user_id=client.current_user_id(),
-        allow_write=args.allow_draft_writes,
-    )
+    if args.loop:
+        result = run_agent(
+            client,
+            llm,
+            request=request,
+            target_id=args.work_order,
+            today=args.today,
+            own_user_id=client.current_user_id(),
+            allow_write=args.allow_draft_writes,
+        )
+    else:
+        result = executor.run_graph_agent(
+            client,
+            llm,
+            request=request,
+            target_id=args.work_order,
+            today=args.today,
+            own_user_id=client.current_user_id(),
+            reschedule_requested=args.request is None,
+            config=resolved_config,
+            authority={"write": False, "reason": "cli_read_only"},
+            receipt=None,
+        )
     if result["outcome"] == "answered":
         answer = project_answer(result["raw"], args.work_order, result.get("reschedule"))
         answer["prose"] = result["prose"]

@@ -88,7 +88,12 @@ def llm_subject(
     own_user_id: str | None,
     llm: Any,
 ) -> dict[str, Any]:
-    """Run the LLM-directed subject and project its code-classified claims."""
+    (
+        """Run the LLM-directed subject and project its code-classified claims.
+
+        Frozen baseline since phase 8: bug fixes only, no new features; delete after """
+        "the capstone is submitted."
+    )
     del request_kind, reschedule
     try:
         result = run_agent(
@@ -152,7 +157,7 @@ def graph_subject(
     authority: dict[str, Any],
     receipt: Callable[[dict[str, Any]], str] | None = None,
 ) -> dict[str, Any]:
-    """Run the graph subject and project its code-classified claims."""
+    """Run the graph LLM subject and project its code-classified claims."""
     del request_kind
     try:
         result = run_graph_agent(
