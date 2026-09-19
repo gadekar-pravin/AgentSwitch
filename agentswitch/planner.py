@@ -68,6 +68,7 @@ Use only the canonical capabilities listed in the manifest. Arguments must exact
 Every depends_on id must already exist in the graph. Never depend on a node proposed in the same patch; propose that child again in the next round after its parent exists.
 The answer capability must be the only addition in its patch, and propose it only when no node is pending or running. The patch finish flag does not finish the run; only a succeeded answer node does.
 A failed read may be proposed again. List reads are paged to completion by code, so provide only real filters. Never use empty or :placeholder filter values.
+A failed read's error type identifies the fitting refusal: not_found on the target read means the target does not exist; transport or permission failures mean the source is unavailable.
 Use reschedule_work_order only for the supplied target and at most once. It returns a proposal because writes are not permitted.
 Code computes lateness, causes, and downstream claims only from records read. Status comes first: draft, completed, and cancelled work orders are never late. Shared-BOM material links identify only potential downstream consumers.
 Refuse with not_found only when the target does not exist; outside_seat when needed data or actions are absent from the seat catalogue; unsupported when the request cannot be supported by available data; source_unavailable when an offered source fails.
@@ -200,6 +201,15 @@ def _compact(value: Any) -> str:
     )
 
 
+def _compact_in_order(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
 def _truncated_json(value: Any, limit: int) -> str:
     if limit <= 0:
         return ""
@@ -233,23 +243,140 @@ def _row_count(outcome: dict[str, Any] | None) -> int | None:
     return None
 
 
+def _failed_projection_parts(
+    node: NodeSnapshot,
+) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
+    """Split failure detail into protected metadata, message, and other detail."""
+    metadata: dict[str, Any] = {"failure_reason": node.failure_reason}
+    detail = copy.deepcopy(node.error_detail)
+    message = None
+
+    if isinstance(detail, dict):
+        error = detail.get("error")
+        if isinstance(error, dict):
+            error = dict(error)
+            error_type = error.pop("type", None)
+            if error_type is not None:
+                metadata["type"] = error_type
+            if "outcome_unknown" in error:
+                metadata["outcome_unknown"] = error.pop("outcome_unknown")
+            raw_message = error.pop("message", None)
+            if raw_message is not None:
+                message = str(raw_message)
+            detail = dict(detail)
+            detail.pop("error")
+            if error:
+                detail["error"] = error
+
+        if "blocked_by" in detail:
+            metadata["blocked_by"] = detail.pop("blocked_by")
+
+        if node.failure_reason == "incomplete_scan":
+            total = detail.pop("total", None)
+            if total is not None:
+                metadata["total"] = total
+            rows = _row_count(detail)
+            if rows is not None:
+                metadata["rows"] = rows
+            if "complete" in detail:
+                metadata["complete"] = detail.pop("complete")
+    elif detail is not None:
+        detail = {"value": detail}
+
+    return metadata, message, detail if isinstance(detail, dict) else {}
+
+
+def _failed_projection(
+    node: NodeSnapshot, limit: int, *, include_detail: bool = True
+) -> str:
+    """Render a failure with diagnostic metadata protected from long messages."""
+    if limit <= 0:
+        return ""
+    metadata, message, detail = _failed_projection_parts(node)
+    full = dict(metadata)
+    if message is not None:
+        full["message"] = message
+    if detail:
+        full["detail"] = detail
+    rendered = _compact_in_order(full)
+    if include_detail and len(rendered) <= limit:
+        return rendered
+
+    base = {**metadata, "truncated": True}
+    rendered_base = _compact_in_order(base)
+    if len(rendered_base) > limit:
+        return _truncated_json(metadata, limit)
+    if not include_detail:
+        return rendered_base
+
+    content = dict(metadata)
+    if message is not None:
+        with_message = {**content, "message": message, "truncated": True}
+        if len(_compact_in_order(with_message)) > limit:
+            low = 0
+            high = len(message)
+            best = rendered_base
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = _compact_in_order(
+                    {**content, "message": message[:middle], "truncated": True}
+                )
+                if len(candidate) <= limit:
+                    best = candidate
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            return best
+        content["message"] = message
+
+    best = _compact_in_order({**content, "truncated": True})
+    if detail:
+        low = 1
+        high = len(_compact(detail))
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = _compact_in_order(
+                {
+                    **content,
+                    "detail": _truncated_json(detail, middle),
+                    "truncated": True,
+                }
+            )
+            if len(candidate) <= limit:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+    return best
+
+
 def _summary_projection(node: NodeSnapshot, limit: int) -> str:
+    if node.state == "failed":
+        return _failed_projection(node, limit, include_detail=False)
     summary: dict[str, Any] = {
         "capability": node.capability,
         "id": node.id,
         "state": node.state,
     }
-    rows = _row_count(node.outcome)
+    projected = node.error_detail if node.state == "failed" else node.outcome
+    rows = _row_count(projected)
     if rows is not None:
         summary["rows"] = rows
     return _truncated_json(summary, limit)
 
 
-def _outcome_projections(
+def _node_projection(node: NodeSnapshot, limit: int) -> str:
+    if node.state == "failed":
+        return _failed_projection(node, limit)
+    return _truncated_json(node.outcome, limit)
+
+
+def _node_projections(
     nodes: tuple[NodeSnapshot, ...], limits: LimitsConfig
 ) -> dict[str, str]:
     projections = {
-        node.id: _truncated_json(node.outcome, limits.projection_chars) for node in nodes
+        node.id: _node_projection(node, limits.projection_chars)
+        for node in nodes
     }
     total = sum(len(value) for value in projections.values())
     if total <= limits.projection_total_chars:
@@ -273,7 +400,7 @@ def _outcome_projections(
     if total > limits.projection_total_chars and newest is not None:
         current = projections[newest.id]
         allowed = max(0, len(current) - (total - limits.projection_total_chars))
-        shortened = _truncated_json(newest.outcome, allowed)
+        shortened = _node_projection(newest, allowed)
         projections[newest.id] = shortened
         total -= len(current) - len(shortened)
 
@@ -294,7 +421,7 @@ def _outcome_projections(
             allowed = max(
                 0, len(current) - (total - limits.projection_total_chars)
             )
-            shortened = _truncated_json(node.outcome, allowed)
+            shortened = _node_projection(node, allowed)
             projections[node.id] = shortened
             total -= len(current) - len(shortened)
     return projections
@@ -343,20 +470,23 @@ def build_messages(
 ) -> list[dict[str, str]]:
     """Build the deterministic, bounded two-message planner prompt for one round."""
     nodes = graph.nodes()
-    projections = _outcome_projections(nodes, limits)
+    projections = _node_projections(nodes, limits)
     dependencies = _dependency_map(graph)
-    node_table = [
-        {
+    node_table = []
+    for node in nodes:
+        row = {
             "arguments": node.arguments,
             "capability": node.capability,
             "depends_on": dependencies[node.id],
             "failure_reason": node.failure_reason,
             "id": node.id,
-            "outcome_projection": projections[node.id],
             "state": node.state,
         }
-        for node in nodes
-    ]
+        projection_key = (
+            "error_projection" if node.state == "failed" else "outcome_projection"
+        )
+        row[projection_key] = projections[node.id]
+        node_table.append(row)
     capabilities = sorted(manifest.capabilities, key=lambda capability: capability.name)
     manifest_projection = [
         {

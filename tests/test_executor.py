@@ -668,6 +668,30 @@ def test_not_found_refusal_has_no_raw_answer(tmp_path, monkeypatch):
     assert "raw" not in result
 
 
+def test_failed_target_read_not_found_detail_reaches_next_planner_request(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex) A failed target read gives the next planner its not-found detail."""
+    config = _config(tmp_path, monkeypatch)
+    responses = [
+        _response(_target_patch()),
+        _response(_patch([_answer(outcome="refused", refusal_reason="not_found")])),
+    ]
+    tools, _, llm, llm_transport = _clients(
+        config,
+        responses,
+        records=_records(WorkOrder=[]),
+    )
+
+    result = _run(tools, llm, config)
+    target = _planner_payload(llm_transport, 1)["nodes"][0]
+
+    assert result["refusal_reason"] == "not_found"
+    assert target["state"] == "failed"
+    assert '"type":"not_found"' in target["error_projection"]
+    assert f"WorkOrder.get id '{TARGET}' not found" in target["error_projection"]
+
+
 def test_failed_parent_blocks_child_without_starting_it(tmp_path, monkeypatch):
     """Spec: AI (Codex) A failed parent immediately blocks its pending child before any MCP call."""
     config = _config(tmp_path, monkeypatch)
