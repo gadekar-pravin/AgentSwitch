@@ -17,7 +17,7 @@ Claude Code loads these in order ([memory docs](https://code.claude.com/docs/en/
 | 2 | `CLAUDE.md` (this file) | repo root, committed | Yes |
 | 3 | `CLAUDE.local.md` | repo root, gitignored | No; each teammate's own copy |
 
-- **This file** holds rules the whole team depends on: no AI-written tests, platform invariants,
+- **This file** holds rules the whole team depends on: test authorship, platform invariants,
   harness rules, secrets. Change it only by a commit the team agrees on; pull before editing and keep
   edits small.
 - **`CLAUDE.local.md`** holds personal, project-specific preferences, e.g. which part of the project
@@ -30,7 +30,7 @@ Claude Code loads these in order ([memory docs](https://code.claude.com/docs/en/
   `ln -s CLAUDE.md AGENTS.md` at the repo root. It is gitignored, so this file stays the only source;
   never edit `AGENTS.md` as a separate copy. Codex has no `CLAUDE.local.md`; personal Codex
   preferences go in `~/.codex/AGENTS.md`. For any other tool, give it this file's team rules,
-  especially the no-AI-tests rule.
+  especially the test-authorship rule.
 
 ## Project
 
@@ -51,14 +51,27 @@ says the platform's own LLM will be integrated with our pipeline once the harnes
 ```bash
 uv sync
 uv run ruff check .
-uv run pytest        # exits 5 until the first hand-written test exists
+uv run pytest        # exits 5 until the first test exists
 ```
 
-## Tests are hand-written — do not author them
+## Tests: AI writes the code; what counts is who specified the test
 
-The brief scores a test written by Claude or Codex at **zero**. Never create or edit test bodies,
-assertions, fixtures or `conftest.py` under `tests/`, even when asked to "add coverage". Running
-tests, explaining failures and proposing what a test should check (in prose) are fine.
+The brief says: "Tests you wrote by hand. Ten points a test … A test written by Claude or Codex
+scores zero." The team reads this by who **planned and specified** the test, not who typed it:
+
+- **Human-specified test (scores):** a teammate decided the test and specified what it checks, its
+  inputs and the expected result. AI then writes the code.
+- **AI-originated test (scores zero):** a test Claude or Codex decided to add on its own while
+  developing code.
+
+All test code is written by AI (Claude, Codex), including fixtures and `conftest.py`. Rules:
+
+- Every test function's docstring states its origin: `Spec: human (<name>)` or `Spec: AI (<tool>)`.
+- Implement a human-specified test exactly as specified. If the spec looks wrong or cannot be
+  implemented as written, ask its author; do not change what it checks.
+- Never mark a test `Spec: human` unless a named teammate specified it. A test list that AI drafted
+  (for example in a plan) is AI-originated until a teammate adopts and owns each spec.
+- Fix the code, not the test: do not weaken an assertion to make a failing test pass.
 
 ## Platform invariants
 

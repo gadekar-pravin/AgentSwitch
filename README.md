@@ -23,7 +23,7 @@ The request our agent must handle:
 | Reschedule step | [agentswitch/reschedule.py](agentswitch/reschedule.py) | done (2026-09-18); writes only a draft created by our login (planned dates only), escalates everything else with a proposed date; live write check on our own Suryodaya draft, restored |
 | Agent (LLM loop) | [agentswitch/agent.py](agentswitch/agent.py), [agentswitch/llm_client.py](agentswitch/llm_client.py) | done (2026-09-18); model `z-ai/glm-5.3-flash` via OpenRouter; 4/4 of the tested read-only tasks on Suryodaya (one run); write task and Keystone not yet run with it; no hand-written tests yet |
 | Harness (tasks, DB-reading verifiers, run records, ≥1 refusal task) | [agentswitch/harness/](agentswitch/harness/) | done (2026-09-18); scores the LLM agent (`--subject llm`) or the deterministic `investigate()` + `reschedule()` adapter (default); deterministic: 6/6 read-only tasks on both tenants, write task passed live on Suryodaya; no hand-written tests yet |
-| Hand-written tests (team members only; AI-written tests score zero) | `tests/` (create when writing the first test) | none yet |
+| Human-specified tests (a teammate specifies each test; AI writes the code; AI-originated tests score zero) | `tests/` (create when writing the first test) | none yet |
 
 Order follows the brief: learn the domain, study a leading product, write the
 gap report, then build the agent and harness.
@@ -41,7 +41,7 @@ Not in git, set up locally by each teammate:
 
 - `agentswitch-team-brief.md` — copy the course brief to the repo root (it is gitignored).
 - `CLAUDE.local.md` — optional personal Claude Code instructions. Claude Code loads it after the
-  shared [CLAUDE.md](CLAUDE.md), which holds the team rules (including: AI must not write tests).
+  shared [CLAUDE.md](CLAUDE.md), which holds the team rules (including: every test states whether a human or AI specified it).
 - `AGENTS.md` — for Codex, a symlink to the shared rules: `ln -s CLAUDE.md AGENTS.md`.
 
 ## Platforms
