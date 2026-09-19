@@ -47,7 +47,11 @@ CATALOGUE = [
         "name": "WorkOrder.update",
         "inputSchema": {
             "type": "object",
-            "properties": {"id": {"type": "string"}},
+            "properties": {
+                "id": {"type": "string"},
+                "planned_start_date": {"type": "string"},
+                "planned_end_date": {"type": "string"},
+            },
             "required": ["id"],
             "additionalProperties": False,
         },
@@ -89,6 +93,33 @@ def test_real_mcp_client_lists_gets_pages_and_refuses_write():
     with pytest.raises(ToolError, match="isError=true"):
         client.call_tool("WorkOrder.update", {"id": "WO-1"}, allow_write=True)
     assert transport.calls
+
+
+def test_offline_work_order_update_requires_opt_in_and_mutates_dates():
+    """Spec: AI (Codex) Writable offline tools update stored planned dates only after opt-in."""
+    arguments = {
+        "id": "WO-1",
+        "planned_start_date": "2026-09-19",
+        "planned_end_date": "2026-09-21",
+    }
+    read_only, _ = offline_mcp_client(CATALOGUE, RECORDS)
+    writable, _ = offline_mcp_client(
+        CATALOGUE,
+        RECORDS,
+        writable_tools={"WorkOrder.update"},
+    )
+
+    with pytest.raises(ToolError, match="isError=true"):
+        read_only.call_tool("WorkOrder.update", arguments, allow_write=True)
+
+    updated = writable.call_tool(
+        "WorkOrder.update", arguments, allow_write=True
+    ).structured
+
+    assert updated["planned_start_date"] == "2026-09-19"
+    assert updated["planned_end_date"] == "2026-09-21"
+    persisted = writable.call_tool("WorkOrder.get", {"id": "WO-1"}).structured
+    assert persisted == updated
 
 
 def test_empty_page_fault_produces_incomplete_scan():

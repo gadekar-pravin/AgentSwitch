@@ -69,7 +69,7 @@ Every depends_on id must already exist in the graph. Never depend on a node prop
 The answer capability takes no dependencies: propose it with an empty depends_on list once everything needed has settled. It must be the only addition in its patch, and may be proposed only when no node is pending or running. The patch finish flag does not finish the run; only a succeeded answer node does.
 A failed read may be proposed again. List reads are paged to completion by code, so provide only real filters. Never use empty or :placeholder filter values.
 A failed read's error type identifies the fitting refusal: not_found on the target read means the target does not exist; transport or permission failures mean the source is unavailable.
-Use reschedule_work_order only for the supplied target and at most once. It returns a proposal because writes are not permitted.
+Use reschedule_work_order only for the supplied target and at most once. It writes new planned dates only when write_authority permits; otherwise it returns a proposal.
 Code computes lateness, causes, and downstream claims only from records read. Status comes first: draft, completed, and cancelled work orders are never late. Shared-BOM material links identify only potential downstream consumers.
 Refuse with not_found only when the target does not exist; outside_seat when needed data or actions are absent from the seat catalogue; unsupported when the request cannot be supported by available data; source_unavailable when an offered source fails.
 For a complete lateness answer, read the target, linked cause sources, all ECOs/BOMs/workstations, the linked BOM and sales order, each consumer BOM's work orders, and finite_schedule."""
@@ -466,6 +466,7 @@ def build_messages(
     state: PlannerState,
     reschedule_requested: bool,
     reschedule_attempted: bool,
+    write_authority: bool = False,
     repair_messages: tuple[str, ...] = (),
 ) -> list[dict[str, str]]:
     """Build the deterministic, bounded two-message planner prompt for one round."""
@@ -515,7 +516,10 @@ def build_messages(
         "target_id": target_id if target_id is not None else "none",
         "today": today.isoformat(),
         "write_authority": (
-            "writes are not permitted; reschedule_work_order returns a proposal only"
+            "writes are permitted for the target only; reschedule_work_order applies "
+            "new planned dates when the guarded checks pass"
+            if write_authority
+            else "writes are not permitted; reschedule_work_order returns a proposal only"
         ),
     }
     return [
@@ -991,6 +995,7 @@ def plan_frontier(
     state: PlannerState,
     reschedule_requested: bool,
     reschedule_attempted: bool,
+    write_authority: bool = False,
     repair_messages: tuple[str, ...] = (),
 ) -> PlannerDecision:
     """Call the metered planner once and return an accepted patch or repair."""
@@ -1005,6 +1010,7 @@ def plan_frontier(
         state=state,
         reschedule_requested=reschedule_requested,
         reschedule_attempted=reschedule_attempted,
+        write_authority=write_authority,
         repair_messages=repair_messages,
     )
     response = client.chat(

@@ -1,5 +1,6 @@
 """Subject adapters exercised by the harness."""
 
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 
@@ -148,6 +149,8 @@ def graph_subject(
     own_user_id: str | None,
     llm: Any,
     config: Any,
+    authority: dict[str, Any],
+    receipt: Callable[[dict[str, Any]], str] | None = None,
 ) -> dict[str, Any]:
     """Run the graph subject and project its code-classified claims."""
     del request_kind
@@ -161,10 +164,8 @@ def graph_subject(
             own_user_id=own_user_id,
             reschedule_requested=reschedule,
             config=config,
-            authority={
-                "write": False,
-                "reason": "phase_4_no_write_authority",
-            },
+            authority=authority,
+            receipt=receipt,
         )
     except GraphAgentError as error:
         agent = error.agent
@@ -201,6 +202,7 @@ def graph_subject(
                 "graph",
                 "patches",
                 "authority",
+                "action_receipt",
                 "missing",
                 "planner",
             )

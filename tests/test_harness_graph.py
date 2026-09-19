@@ -23,11 +23,11 @@ from agentswitch.harness.audits import (
     terminal_last,
     write_after_target_read,
 )
+from agentswitch.harness.recorder import ScopedWriteTools
 from agentswitch.harness.runner import (
     AUDIT_NAMES,
     SCHEMA_VERSION,
-    HarnessConfigurationError,
-    _run_tasks,
+    _restore_fixture,
     _score_run,
     _score_verdict,
     run_tasks,
@@ -64,6 +64,34 @@ CATALOGUE = [
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
     }
 ]
+WRITE_CATALOGUE = [
+    CATALOGUE[0],
+    {
+        "name": "WorkOrder.list",
+        "description": "Offline work-order selection",
+        "inputSchema": _schema(
+            {
+                "status": {"type": "string"},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"},
+            }
+        ),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+    {
+        "name": "WorkOrder.update",
+        "description": "Offline planned-date update",
+        "inputSchema": _schema(
+            {
+                "id": {"type": "string"},
+                "planned_start_date": {"type": "string"},
+                "planned_end_date": {"type": "string"},
+            },
+            ["id"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+]
 TARGET_RECORD = {
     "id": TARGET,
     "number": TARGET,
@@ -79,6 +107,24 @@ RELATED_RECORD = {
     "id": RELATED,
     "number": RELATED,
 }
+
+
+def _write_task() -> dict[str, Any]:
+    return {
+        "id": "reschedule_own_draft",
+        "request": "This draft work order is past its planned dates. Reschedule what you can.",
+        "request_kind": "work_order_lateness",
+        "selector": "own_draft_fixture",
+        "expected": {
+            "outcome": "answered",
+            "is_late": False,
+            "reschedule_action": "applied",
+        },
+        "brief_refusal": False,
+        "reschedule": True,
+        "writes": True,
+        "expectation": "Applies an owned draft planned-date update.",
+    }
 
 
 def _config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
@@ -169,7 +215,7 @@ def _real_agent_record(
         own_user_id=USER,
         reschedule_requested=False,
         config=config,
-        authority={"write": False, "reason": "phase_4_no_write_authority"},
+        authority={"write": False, "reason": "task_read_only"},
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -411,7 +457,7 @@ def _failed_and_blocked_record(
         own_user_id=USER,
         reschedule_requested=False,
         config=config,
-        authority={"write": False, "reason": "phase_4_no_write_authority"},
+        authority={"write": False, "reason": "task_read_only"},
     )
     return {
         "config": config.effective_record(),
@@ -632,7 +678,7 @@ def _hard_repair_exhaustion_record(
             own_user_id=USER,
             reschedule_requested=False,
             config=config,
-            authority={"write": False, "reason": "phase_4_no_write_authority"},
+            authority={"write": False, "reason": "task_read_only"},
         )
 
     assert caught.value.original_type == "PlannerError"
@@ -754,29 +800,73 @@ def test_single_subject_write_fails_for_two_update_attempts(
     assert single_subject_write(record)["verdict"] == "fail"
 
 
-def test_graph_write_flag_is_rejected_before_login() -> None:
-    """Spec: AI (Codex) Graph draft-write authority is a configuration error before login."""
-    calls = 0
+def _receipt_audit_record(
+    action_receipt: dict[str, Any], journal: list[dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "call_log": [],
+        "subject_output": {
+            "agent": {
+                "action_receipt": action_receipt,
+                "journal": journal,
+            }
+        },
+    }
 
-    def forbidden_login(*args: Any, **kwargs: Any) -> tuple[int, bytes]:
-        nonlocal calls
-        calls += 1
-        pytest.fail("login transport must not be called")
 
-    with pytest.raises(
-        HarnessConfigurationError,
-        match="the graph subject has no write authority until phase 6",
-    ):
-        _run_tasks(
-            "suryodaya",
-            failed_restores=[],
-            tasks=(_outside_seat_task(),),
-            transport=forbidden_login,
-            allow_draft_writes=True,
-            subject="graph",
-        )
+def test_single_subject_write_fails_receipt_without_matching_action() -> None:
+    """Spec: AI (Codex) A persisted receipt file must name a started and finished action."""
+    record = _receipt_audit_record(
+        {
+            "file": "run.action.json",
+            "node": "reschedule",
+            "error": None,
+        },
+        [],
+    )
 
-    assert calls == 0
+    assert single_subject_write(record)["verdict"] == "fail"
+
+
+def test_single_subject_write_accepts_receipt_with_matching_action_events() -> None:
+    """Spec: AI (Codex) A receipt-backed action passes when its same node later finishes."""
+    record = _receipt_audit_record(
+        {
+            "file": "run.action.json",
+            "node": "reschedule",
+            "error": None,
+        },
+        [
+            {
+                "seq": 1,
+                "type": "action_started",
+                "node": "reschedule",
+                "data": {"receipt": "run.action.json"},
+            },
+            {
+                "seq": 2,
+                "type": "action_finished",
+                "node": "reschedule",
+                "data": {"status": "applied"},
+            },
+        ],
+    )
+
+    assert single_subject_write(record)["verdict"] == "pass"
+
+
+def test_single_subject_write_accepts_failed_receipt_without_file() -> None:
+    """Spec: AI (Codex) A receipt error with no persisted file is not an audit failure alone."""
+    record = _receipt_audit_record(
+        {
+            "file": None,
+            "node": "reschedule",
+            "error": {"error": {"message": "disk full"}},
+        },
+        [],
+    )
+
+    assert single_subject_write(record)["verdict"] == "pass"
 
 
 def test_graph_agent_error_persists_partial_journal_and_execution_failure(
@@ -820,7 +910,14 @@ def test_graph_agent_error_persists_partial_journal_and_execution_failure(
         ],
         "graph": {"directed": True, "multigraph": False, "graph": {}, "nodes": [], "edges": []},
         "patches": {"accepted": [], "rejected": []},
-        "authority": {"write": False, "reason": "phase_4_no_write_authority"},
+        "authority": {"write": False, "reason": "task_read_only"},
+        "action_receipt": {
+            "file": None,
+            "action": "reschedule_work_order",
+            "target_id": None,
+            "node": "reschedule",
+            "error": {"error": {"message": "offline failure"}},
+        },
         "missing": [],
         "planner": {
             "rounds": 0,
@@ -859,6 +956,9 @@ def test_graph_agent_error_persists_partial_journal_and_execution_failure(
     assert verifier["verdict"] == "fail"
     assert persisted["subject_output"]["agent"]["journal"][-1]["type"] == (
         "run_failed"
+    )
+    assert persisted["subject_output"]["agent"]["action_receipt"] == (
+        partial_agent["action_receipt"]
     )
 
 
@@ -902,7 +1002,7 @@ def test_end_to_end_offline_graph_harness_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec: AI (Codex) Offline run_tasks dispatches graph, meters it, persists it, and passes."""
+    """Spec: AI (Codex) The graph write flag still runs read-only tasks without authority."""
     config = _config(tmp_path, monkeypatch)
     raw_llm, _ = offline_llm_client(
         config,
@@ -929,6 +1029,7 @@ def test_end_to_end_offline_graph_harness_run(
         get_transport=_get_transport,
         env_file=_env_file(tmp_path),
         runs_dir=tmp_path / "graph-runs",
+        allow_draft_writes=True,
         subject="graph",
     )
 
@@ -941,5 +1042,251 @@ def test_end_to_end_offline_graph_harness_run(
     assert persisted["economics"]["summary"]["attempts"] == 1
     assert persisted["subject_output"]["agent"]["authority"] == {
         "write": False,
-        "reason": "phase_4_no_write_authority",
+        "reason": "task_read_only",
     }
+
+
+def test_end_to_end_offline_graph_harness_writes_receipt_and_restores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec: AI (Codex) An authorized graph run receipts one update and restores its fixture."""
+    config = _config(tmp_path, monkeypatch)
+    raw_llm, _ = offline_llm_client(
+        config,
+        [
+            _response([_addition("target", "WorkOrder.get", {"id": TARGET})]),
+            _response(
+                [
+                    _addition(
+                        "reschedule",
+                        "reschedule_work_order",
+                        {"work_order_id": TARGET},
+                    )
+                ]
+            ),
+            _response(
+                [
+                    _answer_addition(
+                        outcome="refused",
+                        refusal_reason="unsupported",
+                        depends_on=["reschedule"],
+                    )
+                ]
+            ),
+        ],
+    )
+    monkeypatch.setattr(runner.llm_client, "from_config", lambda *args, **kwargs: raw_llm)
+    original = {
+        **TARGET_RECORD,
+        "planned_start_date": "2026-09-20",
+        "planned_end_date": "2026-09-22",
+        "created_at": "2026-09-01T00:00:00Z",
+    }
+    mcp = OfflineMcpTransport(
+        WRITE_CATALOGUE,
+        {"WorkOrder": [original]},
+        writable_tools={"WorkOrder.update"},
+    )
+    transport = _HarnessTransport(mcp)
+    runs_dir = tmp_path / "writable-graph-runs"
+
+    summaries = run_tasks(
+        "suryodaya",
+        tasks=(_write_task(),),
+        today=TODAY,
+        transport=transport,
+        get_transport=_get_transport,
+        env_file=_env_file(tmp_path),
+        runs_dir=runs_dir,
+        allow_draft_writes=True,
+        subject="graph",
+    )
+
+    run_path = Path(summaries[0]["run_path"])
+    score_path = Path(summaries[0]["score_path"])
+    persisted = json.loads(run_path.read_text(encoding="utf-8"))
+    score = json.loads(score_path.read_text(encoding="utf-8"))
+    fixture_files = list(runs_dir.glob("*.fixture.json"))
+    action_files = list(runs_dir.glob("*.action.json"))
+    restore_files = list(runs_dir.glob("*.restore.json"))
+
+    assert len(fixture_files) == 1
+    assert len(action_files) == 1
+    assert len(restore_files) == 1
+    action = json.loads(action_files[0].read_text(encoding="utf-8"))
+    assert set(action) == {"action", "target_id", "node", "round", "run_file"}
+    assert action["action"] == "reschedule_work_order"
+    assert action["target_id"] == TARGET
+    assert action["run_file"] == run_path.name
+    authority = persisted["subject_output"]["agent"]["authority"]
+    assert authority == {
+        "write": True,
+        "reason": "draft_write_fixture_ready",
+        "target_id": TARGET,
+        "fixture": fixture_files[0].name,
+    }
+    receipt = persisted["subject_output"]["agent"]["action_receipt"]
+    assert receipt["file"] == action_files[0].name
+    assert persisted["harness_errors"] == []
+    updates = [
+        call
+        for call in persisted["call_log"]
+        if call.get("phase") == "subject"
+        and call.get("tool") == "WorkOrder.update"
+    ]
+    assert len(updates) == 1
+    assert summaries[0]["restore"]["status"] == "restored"
+    assert mcp.records["WorkOrder"][0]["planned_start_date"] == (
+        original["planned_start_date"]
+    )
+    assert mcp.records["WorkOrder"][0]["planned_end_date"] == (
+        original["planned_end_date"]
+    )
+    verifiers = {item["name"]: item for item in score["verifiers"]}
+    for name in (
+        "writes_in_scope",
+        "write_after_target_read",
+        "single_subject_write",
+    ):
+        assert verifiers[name]["verdict"] == "pass"
+
+
+def test_action_receipt_writer_refuses_a_second_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec: AI (Codex) The per-run receipt closure creates at most one action file."""
+    config = _config(tmp_path, monkeypatch)
+    raw_llm, _ = offline_llm_client(config, [])
+    monkeypatch.setattr(runner.llm_client, "from_config", lambda *args, **kwargs: raw_llm)
+    captured: list[Any] = []
+
+    def capture_receipt(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args
+        captured.append(kwargs["receipt"])
+        raise RuntimeError("stop after capturing receipt")
+
+    monkeypatch.setattr(runner, "graph_subject", capture_receipt)
+    original = {
+        **TARGET_RECORD,
+        "planned_start_date": "2026-09-20",
+        "planned_end_date": "2026-09-22",
+        "created_at": "2026-09-01T00:00:00Z",
+    }
+    mcp = OfflineMcpTransport(
+        WRITE_CATALOGUE,
+        {"WorkOrder": [original]},
+        writable_tools={"WorkOrder.update"},
+    )
+    runs_dir = tmp_path / "receipt-runs"
+
+    run_tasks(
+        "suryodaya",
+        tasks=(_write_task(),),
+        today=TODAY,
+        transport=_HarnessTransport(mcp),
+        get_transport=_get_transport,
+        env_file=_env_file(tmp_path),
+        runs_dir=runs_dir,
+        allow_draft_writes=True,
+        subject="graph",
+    )
+
+    assert len(captured) == 1
+    payload = {
+        "action": "reschedule_work_order",
+        "target_id": TARGET,
+        "node": "reschedule",
+        "round": 2,
+    }
+    first = captured[0](payload)
+    assert first.endswith(".action.json")
+    with pytest.raises(RuntimeError, match="already written"):
+        captured[0](payload)
+    assert [path.name for path in runs_dir.glob("*.action.json")] == [first]
+
+
+def test_restore_accepts_interrupted_subject_update_state(
+    tmp_path: Path,
+) -> None:
+    """Spec: AI (Codex) Restore accepts dates from a dispatched update lacking an outcome."""
+    original_dates = {
+        "planned_start_date": "2026-09-20",
+        "planned_end_date": "2026-09-22",
+    }
+    fixture_dates = {
+        "planned_start_date": "2026-09-09",
+        "planned_end_date": "2026-09-16",
+    }
+    subject_dates = {
+        "planned_start_date": "2026-09-19",
+        "planned_end_date": "2026-09-26",
+    }
+    record = {
+        **TARGET_RECORD,
+        **fixture_dates,
+    }
+    client = McpClient(
+        "https://offline.invalid",
+        "offline-token",
+        transport=OfflineMcpTransport(
+            WRITE_CATALOGUE,
+            {"WorkOrder": [record]},
+            writable_tools={"WorkOrder.update"},
+        ),
+    )
+    tools = ScopedWriteTools(
+        client,
+        target_id=TARGET,
+        own_user_id=USER,
+        phase="subject",
+    )
+    tools.call_tool("WorkOrder.get", {"id": TARGET})
+    tools.call_tool(
+        "WorkOrder.update",
+        {"id": TARGET, **subject_dates},
+        allow_write=True,
+    )
+    interrupted = next(
+        call
+        for call in tools.calls
+        if call.get("phase") == "subject"
+        and call.get("tool") == "WorkOrder.update"
+    )
+    del interrupted["outcome"]
+    fixture_path = tmp_path / "interrupted.fixture.json"
+    fixture_path.write_text(
+        json.dumps(
+            {
+                "pre_fixture": {**record, **original_dates},
+                "intended_mutation": {"id": TARGET, **fixture_dates},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored = _restore_fixture(
+        tools,
+        fixture_path=fixture_path,
+        restore_path=tmp_path / "interrupted.restore.json",
+        target_id=TARGET,
+        own_user_id=USER,
+        secrets=(),
+        write_attempted=True,
+        restore_required=True,
+    )
+
+    assert restored["status"] == "restored"
+    produced = restored["compared_states"]["run_produced"]
+    assert any(
+        state.get("source") == "subject_update"
+        and state.get("outcome") == "interrupted"
+        and state.get("dates") == subject_dates
+        for state in produced
+    )
+    current = tools.call_tool("WorkOrder.get", {"id": TARGET}).structured
+    assert {
+        "planned_start_date": current["planned_start_date"],
+        "planned_end_date": current["planned_end_date"],
+    } == original_dates

@@ -646,10 +646,16 @@ def _restore_fixture(
         ]
         for call in tools.calls[:start_index]:
             arguments = call.get("arguments")
+            interrupted_write = (
+                call.get("write") is True and "outcome" not in call
+            )
             if (
                 call.get("phase") != "subject"
                 or call.get("tool") != "WorkOrder.update"
-                or call.get("outcome") not in {"ok", "TransportError"}
+                or (
+                    call.get("outcome") not in {"ok", "TransportError"}
+                    and not interrupted_write
+                )
                 or not isinstance(arguments, dict)
                 or arguments.get("id") != target_id
                 or not any(
@@ -666,7 +672,9 @@ def _restore_fixture(
                 {
                     "source": "subject_update",
                     "sequence": call.get("sequence"),
-                    "outcome": call.get("outcome"),
+                    "outcome": (
+                        "interrupted" if interrupted_write else call.get("outcome")
+                    ),
                     "dates": dates,
                 }
             )
@@ -802,11 +810,6 @@ def _run_tasks(
     if subject not in {"deterministic", "llm", "graph"}:
         raise HarnessConfigurationError(
             f"Invalid subject {subject!r}; expected one of: deterministic, graph, llm"
-        )
-    if subject == "graph" and allow_draft_writes:
-        raise HarnessConfigurationError(
-            "the graph subject has no write authority until phase 6; "
-            "run without --allow-draft-writes"
         )
     if tasks is None:
         try:
@@ -978,6 +981,40 @@ def _run_tasks(
             ready = not task.get("writes") or (
                 isinstance(fixture, dict) and fixture.get("status") == "ready"
             )
+            target_id = selection.get("target_id")
+            if not task.get("writes"):
+                authority = {"write": False, "reason": "task_read_only"}
+            elif (
+                allow_draft_writes
+                and selection.get("status") == "selected"
+                and isinstance(target_id, str)
+                and ready
+                and fixture_path is not None
+            ):
+                authority = {
+                    "write": True,
+                    "reason": "draft_write_fixture_ready",
+                    "target_id": target_id,
+                    "fixture": fixture_path.name,
+                }
+            else:
+                authority = {"write": False, "reason": "writes_disabled"}
+
+            receipt_used = False
+
+            def action_receipt(payload: dict[str, Any]) -> str:
+                nonlocal receipt_used
+                if receipt_used:
+                    raise RuntimeError("action receipt already written for this task run")
+                receipt_used = True
+                persisted = write_exclusive(
+                    output_dir / f"{stem}.action.json",
+                    {**payload, "run_file": f"{stem}.json"},
+                    secrets,
+                )
+                return persisted.name
+
+            receipt = action_receipt if authority["write"] is True else None
             if selection.get("status") == "selected" and ready:
                 tools.phase = "subject"
                 subject_started = time.perf_counter_ns()
@@ -1006,6 +1043,8 @@ def _run_tasks(
                             own_user_id=own_user_id,
                             llm=task_llm,
                             config=effective_config,
+                            authority=authority,
+                            receipt=receipt,
                         )
                     else:
                         subject_output = investigate_subject(

@@ -178,8 +178,10 @@ uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_dr
   uv run python -m agentswitch.harness.concurrency_check runs/
   ```
 
-- `--subject graph` has no write authority until phase 6 of the plan: with `--allow-draft-writes`
-  the harness stops with a configuration error before logging in.
+- `--subject graph` writes only on `reschedule_own_draft` with `--allow-draft-writes`, after the
+  fixture is ready. Before the update it writes `runs/<...>.action.json` (the receipt); if that
+  fails, nothing is sent. The run record shows the authority (`subject_output.agent.authority`)
+  and the receipt (`action_receipt`).
 - A seventh task, `reschedule_own_draft`, checks the one write the agent may make: new planned
   dates on a draft work order created by our own login. It runs only with `--allow-draft-writes`
   and scores `not_applicable` otherwise. With the flag, the harness saves the draft to

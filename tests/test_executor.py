@@ -25,7 +25,7 @@ from agentswitch.executor import (
 from agentswitch.graph import GraphPatch, LiveGraph, NodeSpec, replay
 from agentswitch.harness.audits import journal_consistent
 from agentswitch.harness.recorder import ReadOnlyTools
-from agentswitch.mcp_client import McpClient
+from agentswitch.mcp_client import McpClient, ToolResult, TransportError
 from agentswitch.offline import (
     OfflineMcpTransport,
     offline_llm_client,
@@ -228,12 +228,13 @@ def _clients(
 
 
 def _run(
-    tools: McpClient,
+    tools: Any,
     llm: MeteredClient,
     config: Config,
     *,
     reschedule_requested: bool = False,
     authority: dict[str, Any] | None = None,
+    receipt: Any | None = None,
 ) -> dict[str, Any]:
     return run_graph_agent(
         tools,
@@ -245,6 +246,7 @@ def _run(
         reschedule_requested=reschedule_requested,
         config=config,
         authority=authority or {"write": False},
+        receipt=receipt,
     )
 
 
@@ -298,6 +300,79 @@ def _called_tool(request: dict[str, Any] | None) -> str | None:
         return None
     params = request.get("params")
     return params.get("name") if isinstance(params, dict) else None
+
+
+class _WritableTools:
+    """Small in-memory tool client for exercising the real guarded write path."""
+
+    def __init__(
+        self,
+        *,
+        barrier: threading.Barrier | None = None,
+        barrier_tools: set[str] | None = None,
+        update_outcome_unknown: bool = False,
+        confirmation_fails: bool = False,
+    ) -> None:
+        self.work_order = copy.deepcopy(TARGET_RECORD)
+        self.barrier = barrier
+        self.barrier_tools = barrier_tools or set()
+        self.update_outcome_unknown = update_outcome_unknown
+        self.confirmation_fails = confirmation_fails
+        self.calls: list[dict[str, Any]] = []
+        self.order: list[str] = []
+        self.update_attempts = 0
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        return copy.deepcopy(CATALOGUE)
+
+    @staticmethod
+    def _result(structured: Any) -> ToolResult:
+        return ToolResult(
+            structured=copy.deepcopy(structured),
+            text="",
+            is_error=False,
+            raw={},
+        )
+
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        allow_write: bool = False,
+    ) -> ToolResult:
+        call_arguments = dict(arguments or {})
+        self.calls.append(
+            {
+                "name": name,
+                "arguments": call_arguments,
+                "allow_write": allow_write,
+            }
+        )
+        self.order.append(name)
+        if name in self.barrier_tools:
+            assert self.barrier is not None
+            self.barrier.wait(timeout=5)
+        if name == "WorkOrder.get":
+            if self.confirmation_fails and self.update_attempts:
+                raise TransportError("confirmation failed")
+            return self._result(self.work_order)
+        if name == "WorkOrder.update":
+            assert allow_write is True
+            self.update_attempts += 1
+            if self.update_outcome_unknown:
+                raise TransportError("update failed", outcome_unknown=True)
+            self.work_order.update(
+                {
+                    key: value
+                    for key, value in call_arguments.items()
+                    if key in {"planned_start_date", "planned_end_date"}
+                }
+            )
+            return self._result(self.work_order)
+        if name.endswith(".get"):
+            return self._result({"id": call_arguments["id"]})
+        raise AssertionError(f"unexpected fake tool call {name!r}")
 
 
 def test_store_merge_appends_deep_copies_without_changing_target_snapshot():
@@ -701,6 +776,78 @@ def test_exclusive_waits_for_frontier_reads_to_finish(tmp_path, monkeypatch):
     )
 
 
+def test_authorized_reschedule_is_exclusive_after_parallel_frontier_reads(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex). Parallel reads settle before an authorized reschedule runs alone."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(
+        config,
+        limits=replace(config.limits, max_workers=4, replan="frontier"),
+    )
+    barrier_tools = {"Item.get", "BOM.get", "SalesOrder.get"}
+    barrier = threading.Barrier(len(barrier_tools))
+    responses = [
+        _response(_target_patch()),
+        _response(
+            _patch(
+                [
+                    _addition("a_item", "Item.get", {"id": "ITEM-1"}),
+                    _addition("b_bom", "BOM.get", {"id": "BOM-1"}),
+                    _addition(
+                        "c_sales", "SalesOrder.get", {"id": "SO-1"}
+                    ),
+                    _addition(
+                        "z_reschedule",
+                        "reschedule_work_order",
+                        {"work_order_id": TARGET},
+                    ),
+                ]
+            )
+        ),
+        _response(_patch([_answer(outcome="refused", refusal_reason="unsupported")])),
+    ]
+    _unused, _, llm, _ = _clients(config, responses)
+    tools = _WritableTools(barrier=barrier, barrier_tools=barrier_tools)
+
+    result = _run(
+        tools,
+        llm,
+        config,
+        reschedule_requested=True,
+        authority={"write": True},
+        receipt=lambda _payload: "parallel.action.json",
+    )
+
+    events = result["journal"]
+    read_nodes = {"a_item", "b_bom", "c_sales"}
+    read_terminal = [
+        event["seq"]
+        for event in events
+        if event["node"] in read_nodes
+        and event["type"] in {"task_succeeded", "task_failed"}
+    ]
+    reschedule_started = next(
+        event["seq"]
+        for event in events
+        if event["type"] == "task_started" and event["node"] == "z_reschedule"
+    )
+    reschedule_terminal = next(
+        event["seq"]
+        for event in events
+        if event["node"] == "z_reschedule"
+        and event["type"] in {"task_succeeded", "task_failed"}
+    )
+    assert len(read_terminal) == len(read_nodes)
+    assert max(read_terminal) < reschedule_started
+    assert not any(
+        event["type"] == "task_started"
+        and reschedule_started < event["seq"] < reschedule_terminal
+        for event in events
+    )
+    assert tools.update_attempts == 1
+
+
 def test_terminal_gate_is_preserved_with_four_workers(tmp_path, monkeypatch):
     """Spec: AI (Codex). Terminal work starts after every frontier read is terminal."""
     config = _config(tmp_path, monkeypatch)
@@ -1078,7 +1225,16 @@ def test_reschedule_without_write_authority_returns_proposal_and_never_updates(
     ]
     tools, transport, llm, _ = _clients(config, responses)
 
-    result = _run(tools, llm, config, reschedule_requested=True)
+    def unexpected_receipt(_payload: dict[str, Any]) -> str:
+        pytest.fail("read-only reschedule must not request an action receipt")
+
+    result = _run(
+        tools,
+        llm,
+        config,
+        reschedule_requested=True,
+        receipt=unexpected_receipt,
+    )
 
     assert result["reschedule"]["action"] == "escalated"
     assert result["reschedule"]["reason"] == "writes_disabled"
@@ -1087,6 +1243,203 @@ def test_reschedule_without_write_authority_returns_proposal_and_never_updates(
         "planned_end_date": "2026-09-21",
     }
     assert "WorkOrder.update" not in _tool_names(transport)
+    assert result["action_receipt"] is None
+    action_finished = next(
+        event
+        for event in result["journal"]
+        if event["type"] == "action_finished"
+    )
+    assert action_finished["data"]["status"] == "escalated"
+
+
+def test_write_authority_applies_once_after_receipt_and_records_journal_order(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex). An authorized write persists its receipt before one guarded update."""
+    config = _config(tmp_path, monkeypatch)
+    responses = [
+        _response(_target_patch()),
+        _response(
+            _patch(
+                [
+                    _addition(
+                        "reschedule",
+                        "reschedule_work_order",
+                        {"work_order_id": TARGET},
+                    )
+                ]
+            )
+        ),
+        _response(_patch([_answer(outcome="refused", refusal_reason="unsupported")])),
+    ]
+    _unused, _, llm, _ = _clients(config, responses)
+    tools = _WritableTools()
+    receipt_payloads: list[dict[str, Any]] = []
+
+    def receipt(payload: dict[str, Any]) -> str:
+        receipt_payloads.append(copy.deepcopy(payload))
+        tools.order.append("receipt")
+        return "run.action.json"
+
+    result = _run(
+        tools,
+        llm,
+        config,
+        reschedule_requested=True,
+        authority={"write": True, "source": "test"},
+        receipt=receipt,
+    )
+
+    events = result["journal"]
+
+    def event_seq(event_type: str, node: str) -> int:
+        return next(
+            event["seq"]
+            for event in events
+            if event["type"] == event_type and event["node"] == node
+        )
+
+    target_succeeded = event_seq("task_succeeded", "target")
+    reschedule_started = event_seq("task_started", "reschedule")
+    action_started = event_seq("action_started", "reschedule")
+    action_finished = event_seq("action_finished", "reschedule")
+    reschedule_succeeded = event_seq("task_succeeded", "reschedule")
+    assert (
+        target_succeeded
+        < reschedule_started
+        < action_started
+        < action_finished
+        < reschedule_succeeded
+    )
+    started = next(
+        event
+        for event in events
+        if event["type"] == "action_started" and event["node"] == "reschedule"
+    )
+    finished = next(
+        event
+        for event in events
+        if event["type"] == "action_finished" and event["node"] == "reschedule"
+    )
+    assert started["data"]["receipt"] == "run.action.json"
+    assert finished["data"]["status"] == "applied"
+    assert result["reschedule"]["action"] == "applied"
+    assert result["action_receipt"] == {
+        "file": "run.action.json",
+        "action": "reschedule_work_order",
+        "target_id": TARGET,
+        "node": "reschedule",
+        "error": None,
+    }
+    assert receipt_payloads == [
+        {
+            "action": "reschedule_work_order",
+            "target_id": TARGET,
+            "node": "reschedule",
+            "round": 2,
+        }
+    ]
+    updates = [call for call in tools.calls if call["name"] == "WorkOrder.update"]
+    assert len(updates) == 1
+    assert tools.order.index("receipt") < tools.order.index("WorkOrder.update")
+
+
+def test_receipt_failure_stops_authorized_write_and_fails_run(tmp_path, monkeypatch):
+    """Spec: AI (Codex). A receipt error fails the node before action start or update."""
+    config = _config(tmp_path, monkeypatch)
+    responses = [
+        _response(_target_patch()),
+        _response(
+            _patch(
+                [
+                    _addition(
+                        "reschedule",
+                        "reschedule_work_order",
+                        {"work_order_id": TARGET},
+                    )
+                ]
+            )
+        ),
+    ]
+    _unused, _, llm, _ = _clients(config, responses)
+    tools = _WritableTools()
+
+    def receipt(_payload: dict[str, Any]) -> str:
+        raise OSError("receipt disk full")
+
+    with pytest.raises(GraphAgentError) as caught:
+        _run(
+            tools,
+            llm,
+            config,
+            reschedule_requested=True,
+            authority={"write": True},
+            receipt=receipt,
+        )
+
+    agent = caught.value.agent
+    assert not any(call["name"] == "WorkOrder.update" for call in tools.calls)
+    assert not any(
+        event["type"] == "action_started" for event in agent["journal"]
+    )
+    failure = next(
+        event
+        for event in agent["journal"]
+        if event["type"] == "task_failed" and event["node"] == "reschedule"
+    )
+    assert failure["data"]["reason"] == "receipt_failed"
+    assert agent["action_receipt"]["file"] is None
+    assert agent["action_receipt"]["error"]["error"]["message"] == (
+        "receipt disk full"
+    )
+
+
+def test_unknown_write_status_succeeds_node_without_retry(tmp_path, monkeypatch):
+    """Spec: AI (Codex). An uncertain update plus failed confirmation reports unknown once."""
+    config = _config(tmp_path, monkeypatch)
+    responses = [
+        _response(_target_patch()),
+        _response(
+            _patch(
+                [
+                    _addition(
+                        "reschedule",
+                        "reschedule_work_order",
+                        {"work_order_id": TARGET},
+                    )
+                ]
+            )
+        ),
+        _response(_patch([_answer(outcome="refused", refusal_reason="unsupported")])),
+    ]
+    _unused, _, llm, _ = _clients(config, responses)
+    tools = _WritableTools(
+        update_outcome_unknown=True,
+        confirmation_fails=True,
+    )
+
+    result = _run(
+        tools,
+        llm,
+        config,
+        reschedule_requested=True,
+        authority={"write": True},
+        receipt=lambda _payload: "run.action.json",
+    )
+
+    finished = next(
+        event
+        for event in result["journal"]
+        if event["type"] == "action_finished"
+    )
+    node = next(
+        item for item in result["graph"]["nodes"] if item["id"] == "reschedule"
+    )
+    assert finished["data"]["status"] == "unknown"
+    assert finished["data"]["result"]["action"] == "write_failed"
+    assert finished["data"]["result"]["reason"] == "outcome_unknown"
+    assert node["state"] == "succeeded"
+    assert tools.update_attempts == 1
 
 
 def test_missing_read_soft_repairs_are_exhausted_into_unknowns(tmp_path, monkeypatch):
@@ -1426,14 +1779,107 @@ def test_reschedule_dependency_is_added_when_planner_omits_it(tmp_path, monkeypa
     )
 
 
-def test_write_authority_is_rejected_before_any_mcp_call(tmp_path, monkeypatch):
-    """Spec: AI (Codex) Phase-four write authority is rejected before catalogue discovery."""
+def test_second_reschedule_node_fails_before_receipt_or_update(tmp_path, monkeypatch):
+    """Spec: AI (Codex). The executor latch blocks a second reschedule independently of planning."""
+    config = _config(tmp_path, monkeypatch)
+    _unused, _, llm, _ = _clients(config, [])
+    tools = _WritableTools()
+    receipt_payloads: list[dict[str, Any]] = []
+    patches = [
+        GraphPatch(
+            add=(NodeSpec("target", "WorkOrder.get", {"id": TARGET}),),
+            finish=False,
+            reason="target",
+        ),
+        GraphPatch(
+            add=(
+                NodeSpec(
+                    "reschedule_one",
+                    "reschedule_work_order",
+                    {"work_order_id": TARGET},
+                ),
+            ),
+            finish=False,
+            reason="first write",
+        ),
+        GraphPatch(
+            add=(
+                NodeSpec(
+                    "reschedule_two",
+                    "reschedule_work_order",
+                    {"work_order_id": TARGET},
+                ),
+            ),
+            finish=False,
+            reason="forced second write",
+        ),
+        GraphPatch(
+            add=(
+                NodeSpec(
+                    "answer",
+                    "answer",
+                    {
+                        "outcome": "refused",
+                        "refusal_reason": "unsupported",
+                        "prose": "Done.",
+                    },
+                ),
+            ),
+            finish=False,
+            reason="finish",
+        ),
+    ]
+
+    def bypass_planner(_client: Any, **kwargs: Any) -> Any:
+        return executor_module.planner.PlannerDecision(
+            patch=patches.pop(0),
+            state=kwargs["state"],
+        )
+
+    monkeypatch.setattr(executor_module.planner, "plan_frontier", bypass_planner)
+
+    def receipt(payload: dict[str, Any]) -> str:
+        receipt_payloads.append(copy.deepcopy(payload))
+        return "once.action.json"
+
+    result = _run(
+        tools,
+        llm,
+        config,
+        reschedule_requested=True,
+        authority={"write": True},
+        receipt=receipt,
+    )
+
+    second = next(
+        node
+        for node in result["graph"]["nodes"]
+        if node["id"] == "reschedule_two"
+    )
+    second_events = [
+        event
+        for event in result["journal"]
+        if event["node"] == "reschedule_two"
+    ]
+    assert second["state"] == "failed"
+    assert second["failure_reason"] == "reschedule_already_attempted"
+    assert [event["type"] for event in second_events] == [
+        "task_started",
+        "task_failed",
+    ]
+    assert second_events[-1]["data"]["detail"] == {"target_id": TARGET}
+    assert len(receipt_payloads) == 1
+    assert tools.update_attempts == 1
+
+
+def test_write_authority_without_receipt_fails_before_any_mcp_call(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex). Write authority without a receipt writer fails before discovery."""
     config = _config(tmp_path, monkeypatch)
     tools, transport, llm, llm_transport = _clients(config, [])
 
-    with pytest.raises(
-        NotImplementedError, match="write authority arrives in phase 6"
-    ):
+    with pytest.raises(ValueError, match="requires an action receipt writer"):
         _run(tools, llm, config, authority={"write": True})
 
     assert transport.calls == []
