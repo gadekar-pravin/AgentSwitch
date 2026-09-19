@@ -163,6 +163,36 @@ pass, and `deterministic` 12/12 the same day. Reads overlapped in 30 of the 36 r
 once; `refuse_outside_seat` makes a single read. The 36 runs cost $0.24. Median task time fell only
 from 79 s to 75 s against one worker, because the model, not MCP, takes most of the time.
 
+Switch evidence (phase 8, 2026-09-19; plan section 14, answer 2). The graph agent became the LLM
+agent on this evidence; the team dropped the two-day condition the same day.
+
+- Verdicts: every counted `graph` run passed on the six read-only tasks, as `deterministic` did on
+  the same day: phase 4 (36), phase 5 (36), phase 6 (6, Suryodaya) and phase 8 (12, one sweep per
+  tenant at `93607cb`). The only `graph` failure on record is from phase 4's first exit round, a
+  defect (`finish_reason: error` not retried) fixed before the counted runs.
+- Write: `reschedule_own_draft` passed and restored twice on Suryodaya (phase 6); the write path has
+  not changed since. Keystone has no draft created by our login (read-only check, full scan, 0
+  candidates), so the write task does not apply there.
+- Cost: `graph` against the old loop on the same tenant, median OpenRouter cost per late-order
+  task. The old loop's Keystone numbers are from three sweeps on 2026-09-19 (18/18 pass). The
+  highest single `graph` run cost $0.035, against the $0.25 budget.
+
+| Tenant | Task | Graph median (runs) | Old loop median (runs) | Ratio (limit 1.5) |
+| --- | --- | --- | --- | --- |
+| Suryodaya | late_open_oldest | $0.0076 (12) | $0.035 (3) | 0.22 |
+| Suryodaya | late_with_sales_order | $0.0076 (12) | $0.032 (3) | 0.24 |
+| Suryodaya | late_with_cause | $0.0072 (14) | $0.026 (4) | 0.27 |
+| Keystone | late_open_oldest | $0.0085 (11) | $0.014 (3) | 0.59 |
+| Keystone | late_with_sales_order | $0.0095 (11) | $0.020 (3) | 0.47 |
+| Keystone | late_with_cause | $0.0091 (11) | $0.0085 (3) | 1.07 |
+
+- Judge (advisory; phase 7 live check): all 12 `graph` answers were scored through the forced
+  `score_answer` call, with no `judge_failed`: 7 `resolved`, 5 `unresolved`. Three of the five fell
+  short on `complete` and `meets_expectation`; two scored `consistent` 0 (the judge read the prose
+  as contradicting the answer's claims) on Suryodaya `late_with_sales_order` and Keystone
+  `not_late_completed`, although the verifiers passed both. The `deterministic` answers have no
+  prose and were all `unresolved (no_prose)` with no call. Judge cost: median $0.0006 per task.
+
 ## Harness
 
 ```bash
@@ -218,7 +248,7 @@ uv run python -m agentswitch.harness --tenant suryodaya --subject graph --judge 
   `resolved`, `unresolved` or `judge_failed`. It is advisory: it never changes a verdict or the
   exit code. It uses `[evals]` and `budgets.judge_usd` in the config, the same model as the agent
   (the file says `self_judging`), and makes no call when there is no prose (`deterministic` answers
-  are `unresolved`, reason `no_prose`). Its live check is pending.
+  are `unresolved`, reason `no_prose`). Checked live on 2026-09-19 (see the switch evidence above).
 - Verdicts are `pass`, `fail`, `inconclusive` (the shared book changed, or a read failed) and
   `not_applicable` (no matching target). `inconclusive` is never counted as a pass.
 - Outside that task the harness only calls read-only tools, and every task's write attempts are
