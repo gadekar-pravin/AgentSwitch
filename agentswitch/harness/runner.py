@@ -9,7 +9,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from agentswitch import llm_client
+from agentswitch import config as config_module
+from agentswitch import economics, llm_client
 from agentswitch.mcp_client import McpClient, TransportError, WriteNotAllowed, _read_env_file, login
 
 from .recorder import (
@@ -37,7 +38,7 @@ from .verifiers import (
 )
 from .write_verifiers import reschedule_valid, writes_in_scope
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 VALID_TENANTS = {"suryodaya", "keystone"}
 
 
@@ -728,6 +729,7 @@ def _run_tasks(
     get_transport: Any = None,
     env_file: Path | None = None,
     runs_dir: Path | None = None,
+    config_file: Path | None = None,
     allow_draft_writes: bool = False,
     subject: str = "deterministic",
 ) -> list[dict[str, Any]]:
@@ -749,13 +751,26 @@ def _run_tasks(
         raise HarnessConfigurationError(f"Unknown task id: {error.args[0]}") from None
 
     repo_root = _repo_root()
-    output_dir = _prepare_runs_dir(repo_root, runs_dir)
     selected_env_file = repo_root / ".env" if env_file is None else env_file
+    selected_config_file = (
+        config_module.DEFAULT_CONFIG_PATH if config_file is None else config_file
+    )
+    try:
+        effective_config = config_module.load_config(
+            selected_config_file,
+            env_file=selected_env_file,
+        )
+    except config_module.ConfigError as error:
+        raise HarnessConfigurationError(str(error)) from None
+    output_dir = _prepare_runs_dir(repo_root, runs_dir)
     base_url, email, password = _settings(normalized_tenant, selected_env_file)
-    llm = None
+    raw_llm = None
     if subject == "llm":
         try:
-            llm = llm_client.from_env(str(selected_env_file))
+            raw_llm = llm_client.from_config(
+                effective_config,
+                env_file=selected_env_file,
+            )
         except ValueError as error:
             raise HarnessConfigurationError(str(error)) from None
     subject_name = llm_subject.__name__ if subject == "llm" else investigate_subject.__name__
@@ -764,7 +779,9 @@ def _run_tasks(
     except Exception as error:
         message = redact(str(error), (password,))
         raise HarnessLoginError(f"Login failed: {message}") from None
-    secrets = (token, password) + ((llm.redaction_secret(),) if llm is not None else ())
+    secrets = (token, password) + (
+        (raw_llm.redaction_secret(),) if raw_llm is not None else ()
+    )
     password = ""
     run_today = today or date.today()
     git_metadata = _git_metadata(repo_root)
@@ -783,6 +800,11 @@ def _run_tasks(
 
     for task in selected_tasks:
         task_started = _utc_now()
+        task_llm = (
+            economics.MeteredClient(raw_llm, effective_config)
+            if raw_llm is not None
+            else None
+        )
         stem = f"{task_started.strftime('%Y%m%dT%H%M%S%fZ')}_{normalized_tenant}_{task['id']}"
         client = McpClient(base_url, token, transport=transport, get_transport=get_transport)
         if task.get("writes") and allow_draft_writes and own_user_id is not None:
@@ -886,7 +908,7 @@ def _run_tasks(
                 subject_started = time.perf_counter_ns()
                 try:
                     if subject == "llm":
-                        assert llm is not None
+                        assert task_llm is not None
                         subject_output = llm_subject(
                             tools,
                             request=task["request"],
@@ -895,7 +917,7 @@ def _run_tasks(
                             today=run_today,
                             reschedule=task.get("reschedule", False),
                             own_user_id=own_user_id,
-                            llm=llm,
+                            llm=task_llm,
                         )
                     else:
                         subject_output = investigate_subject(
@@ -930,6 +952,8 @@ def _run_tasks(
                 "tenant": normalized_tenant,
                 "today": run_today.isoformat(),
                 "git": git_metadata,
+                "config": effective_config.effective_record(),
+                "economics": task_llm.ledger() if task_llm is not None else None,
                 "selection": selection,
                 "fixture": fixture,
                 "pre_action_snapshot": pre_action_snapshot,
@@ -1055,6 +1079,7 @@ def run_tasks(
     get_transport: Any = None,
     env_file: Path | None = None,
     runs_dir: Path | None = None,
+    config_file: Path | None = None,
     allow_draft_writes: bool = False,
     subject: str = "deterministic",
 ) -> list[dict[str, Any]]:
@@ -1070,6 +1095,7 @@ def run_tasks(
             get_transport=get_transport,
             env_file=env_file,
             runs_dir=runs_dir,
+            config_file=config_file,
             allow_draft_writes=allow_draft_writes,
             subject=subject,
         )
