@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 from urllib.error import URLError
@@ -25,12 +25,14 @@ class OfflineMcpTransport:
         endpoints: Mapping[str, dict[str, Any]] | None = None,
         faults: Mapping[int, str] | None = None,
         before_response: Callable[[dict[str, Any] | None], None] | None = None,
+        writable_tools: Collection[str] = (),
     ) -> None:
         self.catalogue = deepcopy(list(catalogue))
         self.records = {key: deepcopy(list(value)) for key, value in records.items()}
         self.endpoints = deepcopy(dict(endpoints or {}))
         self.faults = dict(faults or {})
         self.before_response = before_response
+        self.writable_tools = frozenset(writable_tools)
         self.calls: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
@@ -98,6 +100,13 @@ class OfflineMcpTransport:
             None,
         )
         annotations = tool.get("annotations") if tool is not None else None
+        if tool is not None and name in self.writable_tools:
+            if name == "WorkOrder.update":
+                return self._update_work_order(request_id, arguments)
+            return self._tool_error(
+                request_id,
+                f"offline transport has no writable fixture for tool {name!r}",
+            )
         if (
             not isinstance(annotations, dict)
             or annotations.get("readOnlyHint") is not True
@@ -117,6 +126,34 @@ class OfflineMcpTransport:
         if name in self.endpoints:
             return self._tool_result(request_id, deepcopy(self.endpoints[name]))
         return self._tool_error(request_id, f"offline transport has no fixture for tool {name!r}")
+
+    def _update_work_order(
+        self, request_id: Any, arguments: Mapping[str, Any]
+    ) -> tuple[int, bytes]:
+        allowed = {"id", "planned_start_date", "planned_end_date"}
+        date_fields = allowed - {"id"}
+        supplied_dates = date_fields & arguments.keys()
+        if (
+            set(arguments) - allowed
+            or not isinstance(arguments.get("id"), str)
+            or not supplied_dates
+            or any(not isinstance(arguments[field], str) for field in supplied_dates)
+        ):
+            return self._tool_error(
+                request_id,
+                "offline WorkOrder.update accepts only id plus planned date fields",
+            )
+        with self._lock:
+            records = self._records_for("WorkOrder.update")
+            for record in records:
+                if record.get("id") == arguments["id"]:
+                    for field in supplied_dates:
+                        record[field] = arguments[field]
+                    return self._tool_result(request_id, deepcopy(record))
+        return self._tool_error(
+            request_id,
+            f"WorkOrder.update id {arguments['id']!r} not found",
+        )
 
     def _records_for(self, tool_name: str) -> list[dict[str, Any]]:
         entity = tool_name.rsplit(".", 1)[0]
@@ -217,6 +254,7 @@ def offline_mcp_client(
     endpoints: Mapping[str, dict[str, Any]] | None = None,
     faults: Mapping[int, str] | None = None,
     before_response: Callable[[dict[str, Any] | None], None] | None = None,
+    writable_tools: Collection[str] = (),
 ) -> tuple[McpClient, OfflineMcpTransport]:
     """Build an authenticated-looking MCP client and expose its transport."""
     transport = OfflineMcpTransport(
@@ -225,6 +263,7 @@ def offline_mcp_client(
         endpoints=endpoints,
         faults=faults,
         before_response=before_response,
+        writable_tools=writable_tools,
     )
     return McpClient("https://offline.invalid", "offline-token", transport=transport), transport
 

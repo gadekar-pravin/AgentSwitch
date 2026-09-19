@@ -714,6 +714,26 @@ def single_subject_write(record: dict[str, Any]) -> dict[str, Any]:
         ]
         if any(not isinstance(node_id, str) for _, node_id in starts + finishes):
             raise _Malformed("action events must name a node")
+        action_receipt = _agent(record).get("action_receipt")
+        if action_receipt is not None and not isinstance(action_receipt, dict):
+            raise _Malformed("action_receipt must be an object or null")
+        receipt_file = (
+            action_receipt.get("file")
+            if isinstance(action_receipt, dict)
+            else None
+        )
+        receipt_node = (
+            action_receipt.get("node")
+            if isinstance(action_receipt, dict)
+            else None
+        )
+        if receipt_file is not None and (
+            not isinstance(receipt_file, str)
+            or not receipt_file
+            or not isinstance(receipt_node, str)
+            or not receipt_node
+        ):
+            raise _Malformed("persisted action receipt file and node must be non-empty strings")
     except (_Broken, _Malformed) as error:
         return _result(name, "inconclusive", f"malformed write evidence: {error}")
     if len(updates) > 1:
@@ -723,6 +743,28 @@ def single_subject_write(record: dict[str, Any]) -> dict[str, Any]:
             "more than one subject WorkOrder.update attempt was recorded",
             attempts=len(updates),
         )
+    if receipt_file is not None:
+        receipt_starts = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event["type"] == "action_started"
+            and event.get("node") == receipt_node
+            and event["data"].get("receipt") == receipt_file
+        ]
+        if not any(
+            any(
+                finish_index > start_index and finish_node == receipt_node
+                for finish_index, finish_node in finishes
+            )
+            for start_index, _event in receipt_starts
+        ):
+            return _result(
+                name,
+                "fail",
+                "persisted action receipt has no matching completed action",
+                file=receipt_file,
+                node=receipt_node,
+            )
     unfinished = [
         node_id
         for start_index, node_id in starts

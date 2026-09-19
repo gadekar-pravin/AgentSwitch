@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -164,10 +165,12 @@ def run_graph_agent(
     reschedule_requested: bool,
     config: Config,
     authority: dict[str, Any],
+    receipt: Callable[[dict[str, Any]], str] | None = None,
 ) -> dict[str, Any]:
     """Run the bounded frontier planner and execute its validated live graph."""
-    if authority.get("write"):
-        raise NotImplementedError("write authority arrives in phase 6")
+    write_authority = authority.get("write") is True
+    if write_authority and receipt is None:
+        raise ValueError("write authority requires an action receipt writer")
 
     journal = Journal()
     graph = LiveGraph(journal)
@@ -188,6 +191,7 @@ def run_graph_agent(
     reschedule_attempted = False
     reschedule_invoked = False
     reschedule_result: dict[str, Any] | None = None
+    action_receipt: dict[str, Any] | None = None
     final_outcome: str | None = None
     final_refusal_reason: str | None = None
     final_prose: str | None = None
@@ -214,6 +218,7 @@ def run_graph_agent(
             "refusal_reason": final_refusal_reason,
             "prose": final_prose,
             "reschedule": copy.deepcopy(reschedule_result),
+            "action_receipt": copy.deepcopy(action_receipt),
             "model": last_model,
             "usage": _usage_summary(usage_calls),
             "turns": rounds,
@@ -272,12 +277,48 @@ def run_graph_agent(
         return _WorkerResult(True, fragment, outcome=outcome)
 
     def inline_result(node: NodeSnapshot) -> _WorkerResult:
+        nonlocal action_receipt
         if node.capability == "reschedule_work_order":
+            action_data = {
+                "action": "reschedule_work_order",
+                "target_id": target_id,
+            }
+            if write_authority:
+                assert receipt is not None
+                action_receipt = {
+                    "file": None,
+                    **action_data,
+                    "node": node.id,
+                    "error": None,
+                }
+                receipt_payload = {
+                    **action_data,
+                    "node": node.id,
+                    "round": rounds,
+                }
+                try:
+                    receipt_file = receipt(receipt_payload)
+                    if not isinstance(receipt_file, str) or not receipt_file:
+                        raise TypeError(
+                            "action receipt writer must return a non-empty file name"
+                        )
+                except Exception as error:
+                    detail = reads.error_result(error)
+                    action_receipt["error"] = detail
+                    graph.fail(
+                        node.id,
+                        "receipt_failed",
+                        detail,
+                        round=rounds,
+                    )
+                    raise
+                action_receipt["file"] = receipt_file
+                action_data["receipt"] = receipt_file
             journal.append(
                 "action_started",
                 round=rounds,
                 node=node.id,
-                data={"action": "reschedule_work_order", "target_id": target_id},
+                data=action_data,
             )
             try:
                 assert target_id is not None
@@ -287,7 +328,7 @@ def run_graph_agent(
                     target_id,
                     today=today,
                     own_user_id=own_user_id,
-                    allow_write=False,
+                    allow_write=write_authority,
                 )
             except Exception as error:
                 detail = reads.error_result(error)
@@ -295,7 +336,11 @@ def run_graph_agent(
                     "action_finished",
                     round=rounds,
                     node=node.id,
-                    data={"action": "reschedule_work_order", "result": detail},
+                    data={
+                        "action": "reschedule_work_order",
+                        "status": "write_failed",
+                        "result": detail,
+                    },
                 )
                 return _WorkerResult(
                     False,
@@ -307,11 +352,18 @@ def run_graph_agent(
                 key: copy.deepcopy(full_result.get(key))
                 for key in ("action", "reason", "proposed", "applied", "notes")
             }
+            status = outcome["action"]
+            if status == "write_failed" and outcome["reason"] == "outcome_unknown":
+                status = "unknown"
             journal.append(
                 "action_finished",
                 round=rounds,
                 node=node.id,
-                data={"action": "reschedule_work_order", "result": outcome},
+                data={
+                    "action": "reschedule_work_order",
+                    "status": status,
+                    "result": outcome,
+                },
             )
             return _WorkerResult(
                 True, Store(), outcome=outcome, reschedule=full_result
@@ -416,6 +468,15 @@ def run_graph_agent(
 
     def prepare_reschedule(node: NodeSnapshot) -> bool:
         nonlocal reschedule_attempted, reschedule_invoked
+        if reschedule_attempted:
+            graph.start(node.id, round=rounds)
+            graph.fail(
+                node.id,
+                "reschedule_already_attempted",
+                {"target_id": target_id},
+                round=rounds,
+            )
+            return False
         target_read = latest_target_read()
         if target_read is None:
             graph.start(node.id, round=rounds)
@@ -624,6 +685,7 @@ def run_graph_agent(
                     state=state,
                     reschedule_requested=reschedule_requested,
                     reschedule_attempted=reschedule_attempted,
+                    write_authority=write_authority,
                     repair_messages=repair_messages,
                 )
             finally:

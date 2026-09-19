@@ -841,6 +841,41 @@ def test_prompt_is_deterministic_bounded_and_uses_canonical_answer_name():
     assert "finish" not in names
     assert payload["repair_messages"] == ["try exact arguments"]
     assert "reschedule_work_order not yet called" in payload["evidence_checklist"]
+    assert payload["write_authority"] == (
+        "writes are not permitted; reschedule_work_order returns a proposal only"
+    )
+
+
+def test_prompt_describes_effective_write_authority():
+    """Spec: AI (Codex). Write-enabled planner payload differs from the read-only default."""
+    limits = _limits()
+    kwargs = {
+        "request": "Investigate.",
+        "target_id": TARGET,
+        "today": TODAY,
+        "manifest": _manifest(),
+        "graph": LiveGraph(),
+        "store": Store(),
+        "limits": limits,
+        "state": PlannerState.from_limits(limits),
+        "reschedule_requested": True,
+        "reschedule_attempted": False,
+    }
+
+    read_only = build_messages(**kwargs)
+    writable = build_messages(**kwargs, write_authority=True)
+    read_only_payload = json.loads(read_only[1]["content"])
+    writable_payload = json.loads(writable[1]["content"])
+
+    assert read_only_payload["write_authority"] == (
+        "writes are not permitted; reschedule_work_order returns a proposal only"
+    )
+    assert writable_payload["write_authority"] == (
+        "writes are permitted for the target only; reschedule_work_order applies "
+        "new planned dates when the guarded checks pass"
+    )
+    assert writable_payload["write_authority"] != read_only_payload["write_authority"]
+    assert "write_authority permits" in writable[0]["content"]
 
 
 def test_prompt_projects_failed_target_not_found_detail():
