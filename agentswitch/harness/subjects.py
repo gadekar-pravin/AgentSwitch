@@ -116,7 +116,15 @@ def llm_subject(
         "reschedule": result.get("reschedule"),
         "agent": {
             key: result.get(key)
-            for key in ("transcript", "usage", "model", "turns", "repairs", "coverage")
+            for key in (
+                "transcript",
+                "usage",
+                "model",
+                "turns",
+                "repairs",
+                "coverage",
+                "manifest",
+            )
         },
     }
 

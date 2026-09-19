@@ -19,6 +19,15 @@ from .answer import (
     read_requirements,
     refusal,
 )
+from .capabilities import (
+    ALLOWED_MCP_TOOLS,
+    LIST_TOOL_FILTERS,
+    CapabilityArgumentError,
+    Manifest,
+    _native_name,
+    build_manifest,
+    validate,
+)
 from .investigate import PAGE_LIMIT
 from .mcp_client import (
     ArgumentError,
@@ -32,33 +41,6 @@ from .mcp_client import (
 )
 from .reschedule import reschedule
 
-ALLOWED_MCP_TOOLS = (
-    "WorkOrder.get",
-    "WorkOrder.list",
-    "MaterialRequest.list",
-    "SubcontractOrder.list",
-    "JobCard.list",
-    "DowntimeEntry.list",
-    "QualityInspection.list",
-    "EngineeringChangeOrder.list",
-    "BOM.get",
-    "BOM.list",
-    "Workstation.list",
-    "SalesOrder.get",
-    "Item.get",
-    "endpoint.manufacturing.finite_schedule",
-)
-LIST_TOOL_FILTERS = {
-    "WorkOrder.list": ("bom_id", "status", "item_id", "sales_order_id"),
-    "MaterialRequest.list": ("work_order_id",),
-    "SubcontractOrder.list": ("work_order_id",),
-    "JobCard.list": ("work_order_id",),
-    "DowntimeEntry.list": ("work_order_id", "job_card_id"),
-    "QualityInspection.list": ("reference_type", "reference_id"),
-    "EngineeringChangeOrder.list": (),
-    "BOM.list": (),
-    "Workstation.list": (),
-}
 _RESULT_CHARACTER_LIMIT = 60_000
 _REFUSAL_REASONS = {"not_found", "outside_seat", "unsupported", "source_unavailable"}
 
@@ -88,161 +70,44 @@ class AgentError(Exception):
         super().__init__(f"{self.original_type}: {error}")
 
 
-def _native_name(name: str) -> str:
-    if "__" in name:
-        raise ValueError(f"MCP tool name {name!r} cannot be mapped reversibly")
-    mapped = name.replace(".", "__")
-    if len(mapped) > 64:
-        raise ValueError(f"MCP tool name {name!r} exceeds the native-function name limit")
-    return mapped
+def _menu_from_manifest(
+    manifest: Manifest,
+) -> tuple[list[dict[str, Any]], dict[str, str], list[str]]:
+    functions = [
+        {
+            "type": "function",
+            "function": {
+                "name": capability.native_name,
+                "description": capability.description.strip(),
+                "parameters": capability.schema,
+            },
+        }
+        for capability in manifest.capabilities
+    ]
+    native_to_mcp = {
+        capability.native_name: capability.mcp_tool
+        for capability in manifest.capabilities
+        if capability.mcp_tool is not None
+    }
+    return functions, native_to_mcp, manifest.catalogue_names
 
 
-def _strip_defaults(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _strip_defaults(item) for key, item in value.items() if key != "default"}
-    if isinstance(value, list):
-        return [_strip_defaults(item) for item in value]
-    return value
+def _build_manifest_and_menu(
+    tools: Any,
+) -> tuple[Manifest, list[dict[str, Any]], dict[str, str], list[str]]:
+    manifest = build_manifest(tools.list_tools())
+    functions, native_to_mcp, catalogue_names = _menu_from_manifest(manifest)
+    return manifest, functions, native_to_mcp, catalogue_names
 
 
 def build_tool_menu(
     tools: Any,
 ) -> tuple[list[dict[str, Any]], dict[str, str], list[str]]:
     """Build the safe native-function menu from the live seat catalogue."""
-    catalogue = tools.list_tools()
-    catalogue_names = [
-        item.get("name") for item in catalogue if isinstance(item, dict) and isinstance(item.get("name"), str)
-    ]
-    allowed = set(ALLOWED_MCP_TOOLS)
-    functions: list[dict[str, Any]] = []
-    native_to_mcp: dict[str, str] = {}
-    for tool in catalogue:
-        if not isinstance(tool, dict):
-            continue
-        original = tool.get("name")
-        if not isinstance(original, str) or original not in allowed:
-            continue
-        annotations = tool.get("annotations")
-        if (
-            not isinstance(annotations, dict)
-            or annotations.get("readOnlyHint") is not True
-            or annotations.get("destructiveHint") is True
-        ):
-            continue
-        native = _native_name(original)
-        if native in native_to_mcp:
-            raise ValueError(f"Native tool-name collision for {original!r}")
-        schema = _strip_defaults(copy.deepcopy(tool.get("inputSchema", {})))
-        if not isinstance(schema, dict):
-            raise ProtocolError(f"Tool {original!r} has no valid inputSchema")
-        if original.endswith(".list"):
-            catalogue_properties = schema.get("properties")
-            if not isinstance(catalogue_properties, dict):
-                catalogue_properties = {}
-            schema = {
-                "type": "object",
-                "properties": {
-                    name: catalogue_properties[name]
-                    for name in LIST_TOOL_FILTERS[original]
-                    if name in catalogue_properties
-                },
-                "additionalProperties": False,
-            }
-        description = tool.get("description")
-        functions.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": native,
-                    "description": description.strip() if isinstance(description, str) else "",
-                    "parameters": schema,
-                },
-            }
-        )
-        native_to_mcp[native] = original
-
-    functions.extend(
-        [
-            {
-                "type": "function",
-                "function": {
-                    "name": "reschedule_work_order",
-                    "description": "Guardedly propose or apply a reschedule for the supplied target only.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"work_order_id": {"type": "string"}},
-                        "required": ["work_order_id"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "finish",
-                    "description": "Finish with an answer or a principled refusal.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "outcome": {"type": "string", "enum": ["answered", "refused"]},
-                            "refusal_reason": {
-                                "anyOf": [
-                                    {
-                                        "type": "string",
-                                        "enum": sorted(_REFUSAL_REASONS),
-                                    },
-                                    {"type": "null"},
-                                ]
-                            },
-                            "prose": {"type": "string"},
-                        },
-                        "required": ["outcome", "refusal_reason", "prose"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-        ]
+    _manifest, functions, native_to_mcp, catalogue_names = _build_manifest_and_menu(
+        tools
     )
     return functions, native_to_mcp, catalogue_names
-
-
-def _list_filter_schemas_by_native(
-    functions: list[dict[str, Any]], native_to_mcp: dict[str, str]
-) -> dict[str, dict[str, Any]]:
-    exposed: dict[str, dict[str, Any]] = {}
-    for item in functions:
-        function = item.get("function")
-        if not isinstance(function, dict):
-            continue
-        native = function.get("name")
-        if not isinstance(native, str):
-            continue
-        original = native_to_mcp.get(native)
-        if original is None or not original.endswith(".list"):
-            continue
-        parameters = function.get("parameters")
-        properties = parameters.get("properties") if isinstance(parameters, dict) else None
-        if not isinstance(properties, dict):
-            raise ProtocolError(f"Tool {original!r} has no valid exposed filter schema")
-        exposed[native] = copy.deepcopy(properties)
-    return exposed
-
-
-def _declared_enum(schema: Any) -> list[Any] | None:
-    if not isinstance(schema, dict):
-        return None
-    values = schema.get("enum")
-    if isinstance(values, list):
-        return values
-    for keyword in ("anyOf", "oneOf", "allOf"):
-        branches = schema.get(keyword)
-        if not isinstance(branches, list):
-            continue
-        for branch in branches:
-            declared = _declared_enum(branch)
-            if declared is not None:
-                return declared
-    return None
 
 
 def _project_value(value: Any, *, entity: str | None = None) -> Any:
@@ -597,48 +462,6 @@ def _invalid_finish_message(
     )
 
 
-def _invalid_list_filter_message(
-    original: str,
-    arguments: dict[str, Any],
-    schemas: dict[str, Any],
-) -> str | None:
-    unsupported = [key for key in arguments if key not in schemas]
-    if unsupported:
-        allowed_display = ", ".join(sorted(schemas)) or "(none)"
-        unsupported_display = ", ".join(sorted(repr(key) for key in unsupported))
-        return (
-            f"Invalid filters for {original}: unsupported key(s) {unsupported_display}. "
-            f"Allowed filters: {allowed_display}."
-        )
-    for key, value in arguments.items():
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return (
-                    f"Invalid filter {key!r} for {original}: the value is empty or "
-                    "whitespace-only; omit the filter or provide a real value."
-                )
-            if stripped.startswith(":"):
-                return (
-                    f"Invalid filter {key!r} for {original}: {value!r} starts with ':' "
-                    "and is a placeholder, not a real filter value."
-                )
-        if isinstance(key, str) and key.endswith("_id") and not isinstance(value, str):
-            return (
-                f"Invalid filter {key!r} for {original}: received {_received(value)}; "
-                "filters ending in '_id' require a string value."
-            )
-        if key in {"status", "reference_type"}:
-            declared = _declared_enum(schemas[key])
-            if declared is not None and value not in declared:
-                rendered = json.dumps(declared, ensure_ascii=False, default=str)
-                return (
-                    f"Invalid filter {key!r} for {original}: received {_received(value)}; "
-                    f"the catalogue schema allows only {rendered}."
-                )
-    return None
-
-
 def run_agent(
     tools: Any,
     llm: Any,
@@ -666,6 +489,7 @@ def run_agent(
     completed_turns = 0
     contradiction_repair_issued = False
     coverage_repair_issued = False
+    manifest: Manifest | None = None
 
     def partial_state() -> dict[str, Any]:
         return {
@@ -675,6 +499,16 @@ def run_agent(
             "turns": completed_turns,
             "repairs": list(repairs),
             "coverage": coverage(store, target_id, rescheduled=reschedule_invoked),
+            "manifest": {
+                "offered": (
+                    []
+                    if manifest is None
+                    else [capability.name for capability in manifest.capabilities]
+                ),
+                "dropped": (
+                    [] if manifest is None else copy.deepcopy(manifest.dropped)
+                ),
+            },
         }
 
     def tool_message(
@@ -700,19 +534,18 @@ def run_agent(
             arguments = _decode_arguments(function)
             if name in native_to_mcp:
                 original = native_to_mcp[name]
-                if original.endswith(".list"):
-                    filter_error = _invalid_list_filter_message(
-                        original, arguments, exposed_list_filter_schemas[name]
-                    )
-                    if filter_error is not None:
-                        return {
-                            "ok": False,
-                            "error": {
-                                "type": "invalid_params",
-                                "message": filter_error,
-                            },
-                        }
-                return _call_read(tools, store, original, arguments)
+                capability = capabilities_by_native[name]
+                try:
+                    validated = validate(capability, arguments)
+                except CapabilityArgumentError as error:
+                    return {
+                        "ok": False,
+                        "error": {
+                            "type": "invalid_params",
+                            "message": str(error),
+                        },
+                    }
+                return _call_read(tools, store, original, validated)
             if name != "reschedule_work_order":
                 return {
                     "ok": False,
@@ -721,8 +554,9 @@ def run_agent(
                         "message": f"Unknown function {name!r}",
                     },
                 }
-            supplied_id = arguments.get("work_order_id")
-            if set(arguments) != {"work_order_id"} or not isinstance(supplied_id, str):
+            try:
+                validated = validate(capabilities_by_native[name], arguments)
+            except CapabilityArgumentError:
                 return {
                     "ok": False,
                     "error": {
@@ -730,6 +564,7 @@ def run_agent(
                         "message": "work_order_id must be the only argument",
                     },
                 }
+            supplied_id = validated["work_order_id"]
             if target_id is None or supplied_id != target_id:
                 return {
                     "ok": False,
@@ -985,10 +820,10 @@ def run_agent(
         return {"ok": True, "accepted": True}, accepted
 
     try:
-        menu, native_to_mcp, catalogue_names = build_tool_menu(tools)
-        exposed_list_filter_schemas = _list_filter_schemas_by_native(
-            menu, native_to_mcp
+        manifest, menu, native_to_mcp, catalogue_names = _build_manifest_and_menu(
+            tools
         )
+        capabilities_by_native = manifest.by_native_name()
         system = SYSTEM_PROMPT.format(
             today=today.isoformat(),
             target_id=target_id if target_id is not None else "none",
