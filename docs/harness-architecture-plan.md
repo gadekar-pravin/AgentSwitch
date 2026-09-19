@@ -313,8 +313,8 @@ Target selection stays live and in code.
 ### 7.2 Subjects
 
 - `deterministic`: `investigate()` + `reschedule()`, permanent baseline.
-- `llm`: today's loop, until phase 8.
-- `graph`: the new agent.
+- `llm`: the old loop; a frozen baseline since phase 8 (answer 3).
+- `graph`: the new agent; the LLM subject since phase 8.
 
 All three produce the same answer shape and face the same verifiers.
 

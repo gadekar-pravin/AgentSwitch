@@ -31,7 +31,10 @@ def _parser(task_ids: tuple[str, ...]) -> argparse.ArgumentParser:
         "--subject",
         choices=("deterministic", "llm", "graph"),
         default="deterministic",
-        help="subject implementation to evaluate (deterministic, llm, or graph)",
+        help=(
+            "deterministic (default, no LLM), graph (the LLM agent), or llm "
+            "(the old loop, frozen baseline)"
+        ),
     )
     parser.add_argument(
         "--task",
