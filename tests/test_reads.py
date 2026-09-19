@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from agentswitch.answer import Store
+from agentswitch.investigate import PAGE_LIMIT
 from agentswitch.reads import call_list, call_read, guarded_reschedule, render_list_result
 
 
@@ -46,6 +47,7 @@ def test_complete_multi_page_list_scan_deduplicates_and_stores_rows():
     assert store.list_calls == [
         {"tool": "WorkOrder.list", "filters": {"bom_id": "bom-1"}, "complete": True}
     ]
+    assert [call[1]["limit"] for call in tools.calls] == [PAGE_LIMIT, PAGE_LIMIT]
     assert [call[1]["offset"] for call in tools.calls] == [0, 2]
 
 

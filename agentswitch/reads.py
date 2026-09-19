@@ -187,6 +187,7 @@ def call_list(
     tool: str,
     filters: dict[str, Any],
     *,
+    page_size: int = PAGE_LIMIT,
     character_limit: int = RESULT_CHARACTER_LIMIT,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
@@ -197,7 +198,7 @@ def call_list(
     try:
         while True:
             arguments = dict(filters)
-            arguments.update({"limit": PAGE_LIMIT, "offset": offset})
+            arguments.update({"limit": page_size, "offset": offset})
             result = tools.call_tool(tool, arguments, allow_write=False)
             envelope = result.structured
             if not isinstance(envelope, dict):
@@ -252,6 +253,7 @@ def call_read(
     tool: str,
     arguments: dict[str, Any],
     *,
+    page_size: int = PAGE_LIMIT,
     character_limit: int = RESULT_CHARACTER_LIMIT,
 ) -> dict[str, Any]:
     if tool.endswith(".list"):
@@ -263,6 +265,7 @@ def call_read(
                 store,
                 tool,
                 filters,
+                page_size=page_size,
                 character_limit=character_limit,
             ),
         }

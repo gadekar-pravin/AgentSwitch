@@ -234,6 +234,7 @@ def run_graph_agent(
                     store,
                     capability.mcp_tool,
                     node.arguments,
+                    page_size=config.limits.page_size,
                     character_limit=config.limits.projection_chars,
                 )
             except Exception as error:
