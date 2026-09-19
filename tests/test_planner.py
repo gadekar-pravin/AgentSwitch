@@ -14,6 +14,7 @@ from agentswitch.capabilities import Capability, Manifest
 from agentswitch.config import (
     BudgetConfig,
     Config,
+    EvalsConfig,
     LimitsConfig,
     ModelConfig,
     PricingConfig,
@@ -152,11 +153,25 @@ def _config(limits: LimitsConfig | None = None) -> Config:
         ),
         budgets=BudgetConfig(
             run_usd=1,
+            judge_usd=1,
             max_attempts_per_round=1,
             max_attempts_per_run=20,
             admission_safety_factor=1,
         ),
         limits=selected_limits,
+        evals=EvalsConfig(
+            judge_model="offline/model",
+            scale_max=2,
+            floor=1,
+            threshold=1.5,
+            weights={
+                "addresses_task": 1,
+                "specific": 1,
+                "consistent": 1,
+                "complete": 1,
+                "meets_expectation": 1,
+            },
+        ),
         values={},
         overrides=(),
         sha256="offline",

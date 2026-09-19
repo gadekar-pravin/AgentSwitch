@@ -51,6 +51,11 @@ def _parser(task_ids: tuple[str, ...]) -> argparse.ArgumentParser:
         default=DEFAULT_CONFIG_PATH,
         help="runtime TOML configuration path",
     )
+    parser.add_argument(
+        "--judge",
+        action="store_true",
+        help="score answer prose with the rubric judge; advisory, never changes verdicts or exit codes",
+    )
     return parser
 
 
@@ -92,6 +97,7 @@ def main() -> int:
             allow_draft_writes=args.allow_draft_writes,
             subject=args.subject,
             config_file=args.config,
+            judge=args.judge,
         )
     except HarnessConfigurationError as error:
         failures = _exception_failed_restores(error)
@@ -130,6 +136,11 @@ def main() -> int:
             label += " (deterministic adapter scope refusal; no LLM or boundary reasoning exercised)"
         suffix = f"; {'; '.join(details)}" if details else ""
         print(f"{summary['task_id']}: {summary['verdict']} [{label}]{suffix}")
+        judge_summary = summary.get("judge")
+        if judge_summary is not None:
+            print(
+                f"  judge: {judge_summary['status']} ({judge_summary['reason']})"
+            )
         if summary.get("restore_failed"):
             print(
                 _restore_failure_line(

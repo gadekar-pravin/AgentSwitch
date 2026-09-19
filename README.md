@@ -154,6 +154,7 @@ uv run python -m agentswitch.harness --tenant suryodaya --subject graph # the gr
 uv run python -m agentswitch.harness --tenant suryodaya            # all tasks
 uv run python -m agentswitch.harness --tenant keystone --task refuse_not_found
 uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_draft --allow-draft-writes
+uv run python -m agentswitch.harness --tenant suryodaya --subject graph --judge   # plus the rubric judge
 ```
 
 - Tasks are in [agentswitch/harness/tasks.jsonl](agentswitch/harness/tasks.jsonl), one per line; each
@@ -191,6 +192,16 @@ uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_dr
   `RESTORE FAILED` and exits 5: check that draft by hand. Run one write task at a time.
 - Each task writes `runs/<time>_<tenant>_<task>.json` first, then reads it back from disk and
   writes `<same name>.score.json`. Verifiers re-read the platform over MCP; they never read prose.
+- After the score, each task writes `<same name>.spans.json`: a span tree (run → phase → planner
+  round → model attempt or graph node → MCP call) with times, tokens and cost, built from the saved
+  run record. It holds no arguments, results, prompts or prose. Restore calls happen after the run
+  record is saved, so they are not in it.
+- `--judge` adds `<same name>.judge.json`: a rubric judge scores the answer prose (on topic,
+  specific, consistent with the answer's claims, complete, meets the task's `expectation`) as
+  `resolved`, `unresolved` or `judge_failed`. It is advisory: it never changes a verdict or the
+  exit code. It uses `[evals]` and `budgets.judge_usd` in the config, the same model as the agent
+  (the file says `self_judging`), and makes no call when there is no prose (`deterministic` answers
+  are `unresolved`, reason `no_prose`). Its live check is pending.
 - Verdicts are `pass`, `fail`, `inconclusive` (the shared book changed, or a read failed) and
   `not_applicable` (no matching target). `inconclusive` is never counted as a pass.
 - Outside that task the harness only calls read-only tools, and every task's write attempts are

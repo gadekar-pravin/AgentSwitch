@@ -241,6 +241,7 @@ def from_config(
     *,
     env_file: str | os.PathLike[str] = ".env",
     transport: Transport | None = None,
+    model: str | None = None,
 ) -> OpenRouterClient:
     """Construct a client from resolved model config and an environment API key."""
     if "OPENROUTER_API_KEY" in os.environ:
@@ -251,7 +252,7 @@ def from_config(
         raise ValueError("Missing required configuration variable OPENROUTER_API_KEY")
     return OpenRouterClient(
         api_key,
-        config.models.agent,
+        config.models.agent if model is None else model,
         reasoning_effort=config.models.reasoning_effort,
         seed=config.models.seed,
         max_tokens=config.models.max_tokens,

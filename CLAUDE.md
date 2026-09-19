@@ -48,7 +48,9 @@ once the harness is ready (Release 1 note, 2026-09-17).
 Next: [docs/harness-architecture-plan.md](docs/harness-architecture-plan.md) ports the agent and
 harness to the S17Code architecture in phases. The team agreed it on 2026-09-19; phases 1, 2,
 2b, 3, 4, 5 and 6 are done (`--subject graph` runs the new graph agent, with up to four reads at
-once, and makes the one draft write with `--allow-draft-writes`). Follow the plan's phase order.
+once, and makes the one draft write with `--allow-draft-writes`). Phase 7's code is done: every
+task writes a spans file, and `--judge` adds an advisory rubric judge file; its live check is
+pending and runs with phase 8's live runs. Follow the plan's phase order.
 
 ## Commands
 

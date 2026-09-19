@@ -1,5 +1,6 @@
 """Run, persist, and independently score the read-only harness tasks."""
 
+import copy
 import json
 import os
 import subprocess
@@ -10,7 +11,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agentswitch import config as config_module
-from agentswitch import economics, llm_client
+from agentswitch import economics, llm_client, telemetry
+from agentswitch import judge as judge_module
 from agentswitch.mcp_client import McpClient, TransportError, WriteNotAllowed, _read_env_file, login
 
 from .audits import (
@@ -801,6 +803,7 @@ def _run_tasks(
     config_file: Path | None = None,
     allow_draft_writes: bool = False,
     subject: str = "deterministic",
+    judge: bool = False,
 ) -> list[dict[str, Any]]:
     """Run selected tasks, persisting each run before independently scoring it."""
     normalized_tenant = tenant.strip().lower()
@@ -908,6 +911,7 @@ def _run_tasks(
         pre_action_snapshot: dict[str, Any] | None = None
         restore: dict[str, Any] | None = None
         score_record: dict[str, Any] | None = None
+        persisted_run: dict[str, Any] | None = None
         run_path: Path | None = None
         persistence_error: Exception | None = None
 
@@ -1171,11 +1175,69 @@ def _run_tasks(
             raise HarnessPersistenceError(
                 f"Could not persist score for task {task['id']}: {redact(str(error), secrets)}",
             ) from None
+        assert persisted_run is not None
+        try:
+            spans_path = write_exclusive(
+                run_path.with_name(f"{run_path.stem}.spans.json"),
+                telemetry.build_spans(persisted_run),
+                secrets,
+            )
+        except (OSError, TypeError, ValueError) as error:
+            raise HarnessPersistenceError(
+                f"Could not persist spans for task {task['id']}: {redact(str(error), secrets)}",
+            ) from None
+        judge_summary: dict[str, Any] | None = None
+        if judge:
+            judge_secrets = secrets
+
+            def make_judge_client() -> Any:
+                nonlocal judge_secrets
+                client = llm_client.from_config(
+                    effective_config,
+                    env_file=selected_env_file,
+                    model=effective_config.evals.judge_model,
+                )
+                judge_secrets = (*judge_secrets, client.redaction_secret())
+                return client
+
+            try:
+                judge_record = judge_module.judge_answer(
+                    request=task["request"],
+                    expectation=task["expectation"],
+                    today=run_today,
+                    answer=copy.deepcopy(persisted_run.get("answer")),
+                    config=effective_config,
+                    make_client=make_judge_client,
+                )
+                judge_record["run_file"] = run_path.name
+                judge_record["score_file"] = score_path.name
+                judge_path = write_exclusive(
+                    run_path.with_name(f"{run_path.stem}.judge.json"),
+                    judge_record,
+                    judge_secrets,
+                )
+                judge_summary = {
+                    "status": judge_record["status"],
+                    "reason": judge_record["reason"],
+                    "path": str(judge_path),
+                }
+            except Exception as error:
+                print(
+                    f"JUDGE FILE FAILED for {task['id']}: {type(error).__name__}",
+                    file=sys.stderr,
+                )
+                judge_summary = {
+                    "status": "judge_failed",
+                    "reason": "write_failed",
+                    "path": None,
+                }
         summaries.append(
             {
                 "task_id": task["id"],
                 "run_path": str(run_path),
                 "score_path": str(score_path),
+                "spans_path": str(spans_path),
+                "judge": judge_summary,
                 "verdict": score_record["verdict"],
                 "verifiers": [
                     {
@@ -1210,6 +1272,7 @@ def run_tasks(
     config_file: Path | None = None,
     allow_draft_writes: bool = False,
     subject: str = "deterministic",
+    judge: bool = False,
 ) -> list[dict[str, Any]]:
     """Run selected tasks and attach all failed restores to any propagated exception."""
     failed_restores: list[dict[str, Any]] = []
@@ -1227,6 +1290,7 @@ def run_tasks(
             config_file=config_file,
             allow_draft_writes=allow_draft_writes,
             subject=subject,
+            judge=judge,
         )
     except BaseException as error:
         error.failed_restores = failed_restores

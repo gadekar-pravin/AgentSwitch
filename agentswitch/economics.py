@@ -74,15 +74,32 @@ def _reasoning_tokens(usage: dict[str, Any]) -> int | None:
 class MeteredClient:
     """Apply budget policy and retry accounting around a single-attempt client."""
 
-    def __init__(self, client: Any, config: Config, *, sleep: Any = time.sleep) -> None:
+    def __init__(
+        self,
+        client: Any,
+        config: Config,
+        *,
+        sleep: Any = time.sleep,
+        budget_usd: int | float | None = None,
+        clock: Any = time.monotonic_ns,
+    ) -> None:
         self._client = client
         self._config = config
         self._sleep = sleep
+        self._clock = clock
         self.model = client.model
         self.max_tokens = config.models.max_tokens
         self._pricing_row, self._pricing = config.pricing_for(self.model)
+        selected_budget = config.budgets.run_usd if budget_usd is None else budget_usd
+        if (
+            not isinstance(selected_budget, (int, float))
+            or isinstance(selected_budget, bool)
+            or not _decimal(selected_budget).is_finite()
+            or selected_budget <= 0
+        ):
+            raise ValueError("budget_usd must be a finite number greater than 0")
         self._budget_micro = int(
-            (_decimal(config.budgets.run_usd) * _MICRO_PER_USD).to_integral_value(
+            (_decimal(selected_budget) * _MICRO_PER_USD).to_integral_value(
                 rounding=ROUND_FLOOR
             )
         )
@@ -127,6 +144,7 @@ class MeteredClient:
             round=round_number,
             attempt=attempt,
         )
+        refused_ns = self._clock()
         self._refusal = error.details()
         self._entries.append(
             {
@@ -148,6 +166,8 @@ class MeteredClient:
                 "charged_micro": 0,
                 "overrun_micro": 0,
                 "remaining_micro_after": self._remaining(),
+                "started_ns": refused_ns,
+                "finished_ns": refused_ns,
             }
         )
         raise error
@@ -192,6 +212,8 @@ class MeteredClient:
         estimate_micro: int,
         response: dict[str, Any] | None,
         error: Exception | None,
+        started_ns: int,
+        finished_ns: int,
     ) -> None:
         raw_usage = response.get("usage") if response is not None else getattr(error, "usage", None)
         usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -257,6 +279,8 @@ class MeteredClient:
                 "charged_micro": charged_micro,
                 "overrun_micro": max(0, charged_micro - estimate_micro),
                 "remaining_micro_after": self._remaining(),
+                "started_ns": started_ns,
+                "finished_ns": finished_ns,
             }
         )
 
@@ -288,6 +312,7 @@ class MeteredClient:
             self._attempts += 1
             response: dict[str, Any] | None = None
             error: Exception | None = None
+            started_ns = self._clock()
             try:
                 response = self._client.chat(
                     messages,
@@ -297,6 +322,8 @@ class MeteredClient:
                 )
             except Exception as caught:
                 error = caught
+            finally:
+                finished_ns = self._clock()
             self._charge(
                 round_number=round_number,
                 attempt=attempt,
@@ -304,6 +331,8 @@ class MeteredClient:
                 estimate_micro=estimate_micro,
                 response=response,
                 error=error,
+                started_ns=started_ns,
+                finished_ns=finished_ns,
             )
             if error is None:
                 assert response is not None
