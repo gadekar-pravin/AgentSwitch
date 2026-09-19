@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import threading
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -10,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from agentswitch import executor as executor_module
+from agentswitch.answer import Store
 from agentswitch.capabilities import build_manifest
 from agentswitch.config import Config, load_config
 from agentswitch.economics import MeteredClient
@@ -19,6 +23,8 @@ from agentswitch.executor import (
     run_graph_agent,
 )
 from agentswitch.graph import GraphPatch, LiveGraph, NodeSpec, replay
+from agentswitch.harness.audits import journal_consistent
+from agentswitch.harness.recorder import ReadOnlyTools
 from agentswitch.mcp_client import McpClient
 from agentswitch.offline import (
     OfflineMcpTransport,
@@ -187,6 +193,7 @@ def _clients(
     *,
     records: dict[str, list[dict[str, Any]]] | None = None,
     faults: dict[int, str] | None = None,
+    before_response: Any | None = None,
 ) -> tuple[McpClient, OfflineMcpTransport, MeteredClient, Any]:
     mcp_transport = OfflineMcpTransport(
         CATALOGUE,
@@ -206,6 +213,7 @@ def _clients(
             }
         },
         faults=faults,
+        before_response=before_response,
     )
     tools = McpClient(
         "https://offline.invalid", "offline-token", transport=mcp_transport
@@ -283,6 +291,648 @@ def _tool_names(transport: OfflineMcpTransport) -> list[str]:
 def _planner_payload(llm_transport: Any, call: int) -> dict[str, Any]:
     content = llm_transport.calls[call]["body"]["messages"][1]["content"]
     return json.loads(content)
+
+
+def _called_tool(request: dict[str, Any] | None) -> str | None:
+    if not isinstance(request, dict) or request.get("method") != "tools/call":
+        return None
+    params = request.get("params")
+    return params.get("name") if isinstance(params, dict) else None
+
+
+def test_store_merge_appends_deep_copies_without_changing_target_snapshot():
+    """Spec: AI (Codex). Store fragments merge in order without sharing mutable data."""
+    destination = Store(
+        target_before_reschedule={"id": TARGET, "status": "draft"},
+        target_snapshot_pinned=True,
+    )
+    destination.add_record("WorkOrder", {"id": TARGET, "value": "old"})
+    fragment = Store()
+    fragment.add_get(
+        "WorkOrder.get",
+        {"id": TARGET},
+        {"id": TARGET, "value": "new"},
+        model_read=True,
+    )
+    fragment.add_list(
+        "WorkOrder.list", {}, [{"id": TARGET, "value": "list"}], complete=True
+    )
+    fragment.endpoints["endpoint.test"] = [{"result": {"value": 1}}]
+    fragment.endpoint_calls.append({"tool": "endpoint.test", "arguments": {}})
+
+    destination.merge(fragment)
+    fragment.records["WorkOrder"][TARGET][0]["value"] = "mutated"
+    fragment.list_calls[0]["filters"]["later"] = True
+    fragment.endpoints["endpoint.test"][0]["result"]["value"] = 2
+
+    assert [
+        row["value"] for row in destination.records["WorkOrder"][TARGET]
+    ] == ["old", "new", "list"]
+    assert destination.list_calls == [
+        {"tool": "WorkOrder.list", "filters": {}, "complete": True}
+    ]
+    assert destination.endpoints["endpoint.test"] == [{"result": {"value": 1}}]
+    assert destination.endpoint_calls == [
+        {"tool": "endpoint.test", "arguments": {}}
+    ]
+    assert destination.successful_gets[0]["record"]["value"] == "new"
+    assert destination.target_snapshot_pinned is True
+    assert destination.target_before_reschedule == {
+        "id": TARGET,
+        "status": "draft",
+    }
+
+    pinned_fragment = Store(target_snapshot_pinned=True)
+    with pytest.raises(ValueError, match="pinned target snapshot"):
+        destination.merge(pinned_fragment)
+
+
+def test_frontier_reads_overlap_and_keep_node_attribution(tmp_path, monkeypatch):
+    """Spec: AI (Codex). Two frontier reads overlap and retain their own node ids."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, max_workers=2))
+    barrier = threading.Barrier(2)
+
+    def before_response(request: dict[str, Any] | None) -> None:
+        if _called_tool(request) in {"WorkOrder.get", "Item.get"}:
+            barrier.wait(timeout=5)
+
+    responses = [
+        _response(
+            _patch(
+                [
+                    _addition("a_target", "WorkOrder.get", {"id": TARGET}),
+                    _addition("b_item", "Item.get", {"id": "ITEM-1"}),
+                ]
+            )
+        ),
+        _response(
+            _patch([_answer(outcome="refused", refusal_reason="unsupported")])
+        ),
+    ]
+    client, _, llm, _ = _clients(
+        config,
+        responses,
+        records=_records(Item=[{"id": "ITEM-1", "name": "Widget"}]),
+        before_response=before_response,
+    )
+    tools = ReadOnlyTools(client, phase="subject")
+
+    result = _run(tools, llm, config)
+
+    read_events = [
+        event
+        for event in result["journal"]
+        if event["node"] in {"a_target", "b_item"}
+        and event["type"] in {"task_started", "task_succeeded", "task_failed"}
+    ]
+    assert [event["type"] for event in read_events[:2]] == [
+        "task_started",
+        "task_started",
+    ]
+    assert {call["node"] for call in tools.calls if call["kind"] == "call_tool"} == {
+        "a_target",
+        "b_item",
+    }
+
+
+def test_frontier_never_exceeds_worker_cap(tmp_path, monkeypatch):
+    """Spec: AI (Codex). A three-read frontier runs at most two reads at once."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, max_workers=2))
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+    arrivals = 0
+
+    def before_response(request: dict[str, Any] | None) -> None:
+        nonlocal active, maximum, arrivals
+        if _called_tool(request) not in {"WorkOrder.get", "Item.get", "BOM.get"}:
+            return
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            arrival = arrivals
+            arrivals += 1
+        if arrival < 2:
+            barrier.wait(timeout=5)
+        with lock:
+            active -= 1
+
+    responses = [
+        _response(
+            _patch(
+                [
+                    _addition("a_target", "WorkOrder.get", {"id": TARGET}),
+                    _addition("b_item", "Item.get", {"id": "ITEM-1"}),
+                    _addition("c_bom", "BOM.get", {"id": "BOM-1"}),
+                ]
+            )
+        ),
+        _response(
+            _patch([_answer(outcome="refused", refusal_reason="unsupported")])
+        ),
+    ]
+    tools, _, llm, _ = _clients(
+        config,
+        responses,
+        records=_records(
+            Item=[{"id": "ITEM-1"}], BOM=[{"id": "BOM-1"}]
+        ),
+        before_response=before_response,
+    )
+
+    result = _run(tools, llm, config)
+
+    assert result["outcome"] == "refused"
+    assert maximum == 2
+    running_count = 0
+    replay_maximum = 0
+    for event in result["journal"]:
+        if event["type"] == "task_started":
+            running_count += 1
+            replay_maximum = max(replay_maximum, running_count)
+        elif event["type"] in {"task_succeeded", "task_failed"}:
+            running_count -= 1
+    assert replay_maximum == 2
+
+
+def test_evidence_merge_is_deterministic_across_completion_orders(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex). Node-id merge order fixes record versions and answered raw."""
+    created_stores: list[Store] = []
+    original_store = executor_module.Store
+    original_call_read = executor_module.reads.call_read
+    coordination: dict[str, Any] = {}
+
+    class TrackingStore(original_store):
+        def __init__(self) -> None:
+            super().__init__()
+            created_stores.append(self)
+
+    def differentiated_read(
+        tools: Any,
+        fragment: Store,
+        tool: str,
+        arguments: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        outcome = original_call_read(tools, fragment, tool, arguments, **kwargs)
+        label = "get-version" if tool == "WorkOrder.get" else "list-version"
+        for versions in fragment.records.get("WorkOrder", {}).values():
+            for version in versions:
+                version["merge_marker"] = label
+        if tool == "WorkOrder.get" and isinstance(outcome.get("record"), dict):
+            outcome["record"]["merge_marker"] = label
+        for row in outcome.get("data", []):
+            row["merge_marker"] = label
+        finished = coordination.get(f"{tool}.finished")
+        if isinstance(finished, threading.Event):
+            finished.set()
+        return outcome
+
+    monkeypatch.setattr(executor_module, "Store", TrackingStore)
+    monkeypatch.setattr(executor_module.reads, "call_read", differentiated_read)
+
+    def one_run(order: str, workers: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        config = _config(tmp_path, monkeypatch)
+        config = replace(config, limits=replace(config.limits, max_workers=workers))
+        get_entered = threading.Event()
+        list_entered = threading.Event()
+        get_finished = threading.Event()
+        list_finished = threading.Event()
+        coordination.clear()
+        coordination.update(
+            {
+                "WorkOrder.get.finished": get_finished,
+                "WorkOrder.list.finished": list_finished,
+            }
+        )
+
+        def before_response(request: dict[str, Any] | None) -> None:
+            tool = _called_tool(request)
+            if tool == "WorkOrder.get":
+                get_entered.set()
+                if order == "list-first":
+                    assert list_finished.wait(timeout=5)
+            elif tool == "WorkOrder.list":
+                list_entered.set()
+                if order == "get-first":
+                    assert get_finished.wait(timeout=5)
+
+        responses = [
+            _response(
+                _patch(
+                    [
+                        _addition("a_get", "WorkOrder.get", {"id": TARGET}),
+                        _addition("z_list", "WorkOrder.list", {}),
+                    ]
+                )
+            ),
+            _response(_patch([_answer()])),
+            _response(_patch([_answer()])),
+            _response(_patch([_answer()])),
+        ]
+        before = len(created_stores)
+        tools, _, llm, _ = _clients(
+            config,
+            responses,
+            before_response=before_response if workers > 1 else None,
+        )
+        result = _run(tools, llm, config)
+        shared = created_stores[before]
+        return copy.deepcopy(shared.records["WorkOrder"][TARGET]), result["raw"]
+
+    high_first = one_run("list-first", 2)
+    low_first = one_run("get-first", 2)
+    serial = one_run("serial", 1)
+
+    assert high_first == low_first == serial
+    assert [row["merge_marker"] for row in high_first[0]] == [
+        "get-version",
+        "list-version",
+    ]
+    assert high_first[1]["work_order"]["merge_marker"] == "list-version"
+
+
+def test_incomplete_concurrent_read_merges_partial_evidence(tmp_path, monkeypatch):
+    """Spec: AI (Codex). An incomplete concurrent scan retains its partial rows."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, max_workers=2))
+    barrier = threading.Barrier(2)
+    original_call_read = executor_module.reads.call_read
+
+    def before_response(request: dict[str, Any] | None) -> None:
+        if _called_tool(request) in {"WorkOrder.get", "MaterialRequest.list"}:
+            barrier.wait(timeout=5)
+
+    def incomplete_read(
+        tools: Any,
+        fragment: Store,
+        tool: str,
+        arguments: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if tool != "MaterialRequest.list":
+            return original_call_read(tools, fragment, tool, arguments, **kwargs)
+        result = tools.call_tool(
+            tool, {**arguments, "limit": 1, "offset": 0}, allow_write=False
+        )
+        rows = result.structured["data"]
+        fragment.add_list(tool, arguments, rows, complete=False)
+        return {
+            "ok": True,
+            "data": rows,
+            "total": 2,
+            "returned": len(rows),
+            "complete": False,
+        }
+
+    monkeypatch.setattr(executor_module.reads, "call_read", incomplete_read)
+    responses = [
+        _response(
+            _patch(
+                [
+                    _addition("a_target", "WorkOrder.get", {"id": TARGET}),
+                    _addition(
+                        "b_material",
+                        "MaterialRequest.list",
+                        {"work_order_id": TARGET},
+                    ),
+                ]
+            )
+        ),
+        _response(_patch([_answer()])),
+        _response(_patch([_answer()])),
+        _response(_patch([_answer()])),
+    ]
+    tools, _, llm, _ = _clients(
+        config,
+        responses,
+        records=_records(
+            MaterialRequest=[
+                {"id": "MR-1", "work_order_id": TARGET, "status": "pending"},
+                {"id": "MR-2", "work_order_id": TARGET, "status": "pending"},
+            ]
+        ),
+        before_response=before_response,
+    )
+
+    result = _run(tools, llm, config)
+
+    node = next(
+        item for item in result["graph"]["nodes"] if item["id"] == "b_material"
+    )
+    assert node["failure_reason"] == "incomplete_scan"
+    assert "MR-1" in json.dumps(result["raw"])
+    assert result["coverage"]["MaterialRequest.list"] == "missing"
+
+
+def test_exclusive_waits_for_frontier_reads_to_finish(tmp_path, monkeypatch):
+    """Spec: AI (Codex). Reschedule starts only after all ready reads are committed."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, max_workers=2))
+    barrier = threading.Barrier(2)
+
+    def before_response(request: dict[str, Any] | None) -> None:
+        if _called_tool(request) in {"Item.get", "BOM.get"}:
+            barrier.wait(timeout=5)
+
+    responses = [
+        _response(_target_patch()),
+        _response(
+            _patch(
+                [
+                    _addition("a_item", "Item.get", {"id": "ITEM-1"}),
+                    _addition("b_bom", "BOM.get", {"id": "BOM-1"}),
+                    _addition(
+                        "z_reschedule",
+                        "reschedule_work_order",
+                        {"work_order_id": TARGET},
+                    ),
+                ]
+            )
+        ),
+        _response(
+            _patch([_answer(outcome="refused", refusal_reason="unsupported")])
+        ),
+    ]
+    tools, _, llm, _ = _clients(
+        config,
+        responses,
+        records=_records(
+            Item=[{"id": "ITEM-1"}], BOM=[{"id": "BOM-1"}]
+        ),
+        before_response=before_response,
+    )
+
+    result = _run(tools, llm, config, reschedule_requested=True)
+    events = result["journal"]
+    read_terminal = [
+        event["seq"]
+        for event in events
+        if event["node"] in {"a_item", "b_bom"}
+        and event["type"] in {"task_succeeded", "task_failed"}
+    ]
+    reschedule_started = next(
+        event["seq"]
+        for event in events
+        if event["type"] == "task_started" and event["node"] == "z_reschedule"
+    )
+    action_started = next(
+        event["seq"]
+        for event in events
+        if event["type"] == "action_started" and event["node"] == "z_reschedule"
+    )
+    action_finished = next(
+        event["seq"]
+        for event in events
+        if event["type"] == "action_finished" and event["node"] == "z_reschedule"
+    )
+
+    assert max(read_terminal) < reschedule_started < action_started
+    assert not any(
+        event["type"] == "task_started"
+        and event["node"] in {"a_item", "b_bom"}
+        and action_started < event["seq"] < action_finished
+        for event in events
+    )
+
+
+def test_terminal_gate_is_preserved_with_four_workers(tmp_path, monkeypatch):
+    """Spec: AI (Codex). Terminal work starts after every frontier read is terminal."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, max_workers=4))
+    barrier = threading.Barrier(3)
+
+    def before_response(request: dict[str, Any] | None) -> None:
+        if _called_tool(request) in {"WorkOrder.get", "Item.get", "BOM.get"}:
+            barrier.wait(timeout=5)
+
+    responses = [
+        _response(
+            _patch(
+                [
+                    _addition("a_target", "WorkOrder.get", {"id": TARGET}),
+                    _addition("b_item", "Item.get", {"id": "ITEM-1"}),
+                    _addition("c_bom", "BOM.get", {"id": "BOM-1"}),
+                ]
+            )
+        ),
+        _response(
+            _patch([_answer(outcome="refused", refusal_reason="unsupported")])
+        ),
+    ]
+    tools, _, llm, _ = _clients(
+        config,
+        responses,
+        records=_records(
+            Item=[{"id": "ITEM-1"}], BOM=[{"id": "BOM-1"}]
+        ),
+        before_response=before_response,
+    )
+
+    result = _run(tools, llm, config)
+    answer_started = next(
+        event["seq"]
+        for event in result["journal"]
+        if event["type"] == "task_started" and event["node"] == "answer"
+    )
+    read_terminal = [
+        event["seq"]
+        for event in result["journal"]
+        if event["node"] in {"a_target", "b_item", "c_bom"}
+        and event["type"] in {"task_succeeded", "task_failed"}
+    ]
+    assert max(read_terminal) < answer_started
+
+
+def test_node_replan_runs_one_node_and_replans_after_each(tmp_path, monkeypatch):
+    """Spec: AI (Codex). Node mode stays serial and replans after each completed node."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(
+        config,
+        limits=replace(config.limits, max_workers=4, replan="node"),
+    )
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def before_response(request: dict[str, Any] | None) -> None:
+        nonlocal active, maximum
+        if _called_tool(request) not in {"WorkOrder.get", "Item.get"}:
+            return
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            active -= 1
+
+    responses = [
+        _response(
+            _patch(
+                [
+                    _addition("a_target", "WorkOrder.get", {"id": TARGET}),
+                    _addition("b_item", "Item.get", {"id": "ITEM-1"}),
+                ]
+            )
+        ),
+        _response(_patch([], reason="run remaining node")),
+        _response(
+            _patch([_answer(outcome="refused", refusal_reason="unsupported")])
+        ),
+    ]
+    tools, _, llm, llm_transport = _clients(
+        config,
+        responses,
+        records=_records(Item=[{"id": "ITEM-1"}]),
+        before_response=before_response,
+    )
+
+    result = _run(tools, llm, config)
+
+    assert result["outcome"] == "refused"
+    assert maximum == 1
+    assert len(llm_transport.calls) == 3
+    second_nodes = {
+        node["id"]: node["state"] for node in _planner_payload(llm_transport, 1)["nodes"]
+    }
+    third_nodes = {
+        node["id"]: node["state"] for node in _planner_payload(llm_transport, 2)["nodes"]
+    }
+    assert second_nodes == {"a_target": "succeeded", "b_item": "pending"}
+    assert third_nodes == {"a_target": "succeeded", "b_item": "succeeded"}
+
+
+def test_fatal_worker_error_drains_other_reads_before_run_failed(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex). Fatal worker errors drain and commit held reads before failure."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, max_workers=2))
+    crash_started = threading.Event()
+    held_completed = threading.Event()
+    original_call_read = executor_module.reads.call_read
+
+    def before_response(request: dict[str, Any] | None) -> None:
+        if _called_tool(request) == "WorkOrder.get":
+            assert crash_started.wait(timeout=5)
+
+    def crashing_read(
+        tools: Any,
+        fragment: Store,
+        tool: str,
+        arguments: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if tool == "Item.get":
+            crash_started.set()
+            raise RuntimeError("unexpected worker crash")
+        outcome = original_call_read(tools, fragment, tool, arguments, **kwargs)
+        if tool == "WorkOrder.get":
+            held_completed.set()
+        return outcome
+
+    monkeypatch.setattr(executor_module.reads, "call_read", crashing_read)
+    responses = [
+        _response(
+            _patch(
+                [
+                    _addition("a_held", "WorkOrder.get", {"id": TARGET}),
+                    _addition("z_crash", "Item.get", {"id": "ITEM-1"}),
+                ]
+            )
+        )
+    ]
+    tools, _, llm, _ = _clients(
+        config,
+        responses,
+        records=_records(Item=[{"id": "ITEM-1"}]),
+        before_response=before_response,
+    )
+
+    with pytest.raises(GraphAgentError) as caught:
+        _run(tools, llm, config)
+
+    assert caught.value.original_type == "RuntimeError"
+    assert str(caught.value.original_error) == "unexpected worker crash"
+    assert held_completed.is_set()
+    assert caught.value.agent["journal"][-1]["type"] == "run_failed"
+    held_terminal = next(
+        event["seq"]
+        for event in caught.value.agent["journal"]
+        if event["node"] == "a_held"
+        and event["type"] in {"task_succeeded", "task_failed"}
+    )
+    assert held_terminal < caught.value.agent["journal"][-1]["seq"]
+
+
+def test_rejected_read_outcome_settles_every_started_node_before_run_failed(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex). A rejected read outcome fails its node and drains peers."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, max_workers=2))
+    barrier = threading.Barrier(2)
+    original_call_read = executor_module.reads.call_read
+
+    def before_response(request: dict[str, Any] | None) -> None:
+        if _called_tool(request) in {"WorkOrder.get", "Item.get"}:
+            barrier.wait(timeout=5)
+
+    def non_finite_read(
+        tools: Any,
+        fragment: Store,
+        tool: str,
+        arguments: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        outcome = original_call_read(tools, fragment, tool, arguments, **kwargs)
+        if tool == "Item.get":
+            outcome["record"]["invalid_number"] = float("nan")
+        return outcome
+
+    monkeypatch.setattr(executor_module.reads, "call_read", non_finite_read)
+    responses = [
+        _response(
+            _patch(
+                [
+                    _addition("a_invalid", "Item.get", {"id": "ITEM-1"}),
+                    _addition("z_peer", "WorkOrder.get", {"id": TARGET}),
+                ]
+            )
+        )
+    ]
+    tools, _, llm, _ = _clients(
+        config,
+        responses,
+        records=_records(Item=[{"id": "ITEM-1"}]),
+        before_response=before_response,
+    )
+
+    with pytest.raises(GraphAgentError) as caught:
+        _run(tools, llm, config)
+
+    assert caught.value.original_type == "GraphError"
+    assert "node outcome must be JSON-safe" in str(caught.value.original_error)
+    agent = caught.value.agent
+    terminal_counts = {
+        node_id: sum(
+            event["node"] == node_id
+            and event["type"] in {"task_succeeded", "task_failed"}
+            for event in agent["journal"]
+        )
+        for node_id in ("a_invalid", "z_peer")
+    }
+    assert terminal_counts == {"a_invalid": 1, "z_peer": 1}
+    assert {node["id"]: node["state"] for node in agent["graph"]["nodes"]} == {
+        "a_invalid": "failed",
+        "z_peer": "succeeded",
+    }
+    assert agent["journal"][-1]["type"] == "run_failed"
+    record = {"subject_output": {"agent": agent}}
+    assert journal_consistent(record)["verdict"] == "pass"
 
 
 def test_accepted_same_patch_discard_is_reported_to_next_round(

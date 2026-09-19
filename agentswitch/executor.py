@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import copy
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any
 
 from . import planner, reads
 from .answer import Store, build_raw, coverage
+from .attribution import node_context
 from .capabilities import Capability, Manifest, build_manifest
 from .config import Config
 from .graph import Journal, LiveGraph, NodeSnapshot
+from .mcp_client import McpError
 
 
 class GraphAgentError(Exception):
@@ -28,11 +30,21 @@ class GraphAgentError(Exception):
 @dataclass(frozen=True)
 class _WorkerResult:
     succeeded: bool
+    fragment: Store
     outcome: dict[str, Any] | None = None
     failure_reason: str | None = None
     error_detail: Any | None = None
     raw: dict[str, Any] | None = None
     reschedule: dict[str, Any] | None = None
+
+
+class _WorkerCrashed(Exception):
+    """Carry partial worker evidence while preserving an unexpected exception."""
+
+    def __init__(self, error: Exception, fragment: Store) -> None:
+        self.error = error
+        self.fragment = fragment
+        super().__init__(str(error))
 
 
 class _ObservedClient:
@@ -182,6 +194,8 @@ def run_graph_agent(
     final_raw: dict[str, Any] | None = None
     missing: tuple[str, ...] = ()
     last_model = getattr(llm, "model", None)
+    running: dict[Future[_WorkerResult], NodeSnapshot] = {}
+    buffered_fragments: dict[str, Store] = {}
 
     def planner_record() -> dict[str, int]:
         return {
@@ -227,30 +241,37 @@ def run_graph_agent(
         raise RuntimeError(f"node {node.id!r} has no offered capability")
 
     def worker(node: NodeSnapshot, capability: Capability) -> _WorkerResult:
-        if capability.mcp_tool is not None:
-            try:
+        assert capability.mcp_tool is not None
+        fragment = Store()
+        try:
+            with node_context(node.id):
                 outcome = reads.call_read(
                     tools,
-                    store,
+                    fragment,
                     capability.mcp_tool,
                     node.arguments,
                     page_size=config.limits.page_size,
                     character_limit=config.limits.projection_chars,
                 )
-            except Exception as error:
-                return _WorkerResult(
-                    False,
-                    failure_reason="error",
-                    error_detail=reads.error_result(error),
-                )
-            if "list" in capability.families and outcome.get("complete") is False:
-                return _WorkerResult(
-                    False,
-                    failure_reason="incomplete_scan",
-                    error_detail=copy.deepcopy(outcome),
-                )
-            return _WorkerResult(True, outcome=outcome)
+        except McpError as error:
+            return _WorkerResult(
+                False,
+                fragment,
+                failure_reason="error",
+                error_detail=reads.error_result(error),
+            )
+        except Exception as error:
+            raise _WorkerCrashed(error, fragment) from error
+        if "list" in capability.families and outcome.get("complete") is False:
+            return _WorkerResult(
+                False,
+                fragment,
+                failure_reason="incomplete_scan",
+                error_detail=copy.deepcopy(outcome),
+            )
+        return _WorkerResult(True, fragment, outcome=outcome)
 
+    def inline_result(node: NodeSnapshot) -> _WorkerResult:
         if node.capability == "reschedule_work_order":
             journal.append(
                 "action_started",
@@ -277,7 +298,10 @@ def run_graph_agent(
                     data={"action": "reschedule_work_order", "result": detail},
                 )
                 return _WorkerResult(
-                    False, failure_reason="error", error_detail=detail
+                    False,
+                    Store(),
+                    failure_reason="error",
+                    error_detail=detail,
                 )
             outcome = {
                 key: copy.deepcopy(full_result.get(key))
@@ -290,7 +314,7 @@ def run_graph_agent(
                 data={"action": "reschedule_work_order", "result": outcome},
             )
             return _WorkerResult(
-                True, outcome=outcome, reschedule=full_result
+                True, Store(), outcome=outcome, reschedule=full_result
             )
 
         if node.capability == "answer":
@@ -304,6 +328,7 @@ def run_graph_agent(
                 raw = build_raw(store, target_id, today=today)
             return _WorkerResult(
                 True,
+                Store(),
                 outcome={
                     "outcome": outcome,
                     "refusal_reason": refusal_reason,
@@ -328,38 +353,109 @@ def run_graph_agent(
             return None
         return max(candidates, key=lambda node: (node.frontier, node.id))
 
-    def execute_one() -> bool:
-        nonlocal final_outcome, final_prose, final_raw, final_refusal_reason
-        nonlocal reschedule_attempted, reschedule_invoked, reschedule_result
-        assert manifest is not None
-        node = eligible_ready_node(graph, manifest)
-        if node is None:
-            if graph.has_pending_or_running():
-                raise RuntimeError("pending graph nodes cannot make progress")
-            return False
-        capability = capability_for(node)
-        if node.capability == "reschedule_work_order":
-            target_read = latest_target_read()
-            if target_read is None:
-                graph.start(node.id, round=rounds)
+    def merge_buffered() -> None:
+        for node_id in sorted(buffered_fragments):
+            store.merge(buffered_fragments[node_id])
+        buffered_fragments.clear()
+
+    def settle_completed(node: NodeSnapshot, completed: _WorkerResult) -> None:
+        try:
+            if completed.succeeded:
+                assert completed.outcome is not None
+                graph.succeed(node.id, completed.outcome, round=rounds)
+            else:
+                assert completed.failure_reason is not None
                 graph.fail(
                     node.id,
-                    "target_read_required",
-                    {"target_id": target_id},
+                    completed.failure_reason,
+                    completed.error_detail,
                     round=rounds,
                 )
-                return False
-            if target_read.id not in graph.ancestors(node.id):
-                graph.add_dependency(target_read.id, node.id, round=rounds)
-            reschedule_attempted = True
-            reschedule_invoked = True
+        except Exception as error:
+            try:
+                graph.fail(
+                    node.id,
+                    "error",
+                    reads.error_result(error),
+                    round=rounds,
+                )
+            except Exception:
+                pass
+            raise
 
-        graph.start(node.id, round=rounds)
-        assert pool is not None
-        completed = pool.submit(worker, node, capability).result()
+    def commit_read(
+        future: Future[_WorkerResult], node: NodeSnapshot
+    ) -> None:
+        try:
+            completed = future.result()
+        except _WorkerCrashed as crashed:
+            buffered_fragments[node.id] = crashed.fragment
+            try:
+                graph.fail(
+                    node.id,
+                    "error",
+                    reads.error_result(crashed.error),
+                    round=rounds,
+                )
+            except Exception:
+                pass
+            raise crashed.error
+        except Exception as error:
+            try:
+                graph.fail(
+                    node.id,
+                    "error",
+                    reads.error_result(error),
+                    round=rounds,
+                )
+            except Exception:
+                pass
+            raise
+        buffered_fragments[node.id] = completed.fragment
+        settle_completed(node, completed)
+
+    def prepare_reschedule(node: NodeSnapshot) -> bool:
+        nonlocal reschedule_attempted, reschedule_invoked
+        target_read = latest_target_read()
+        if target_read is None:
+            graph.start(node.id, round=rounds)
+            graph.fail(
+                node.id,
+                "target_read_required",
+                {"target_id": target_id},
+                round=rounds,
+            )
+            return False
+        if target_read.id not in graph.ancestors(node.id):
+            graph.add_dependency(target_read.id, node.id, round=rounds)
+        reschedule_attempted = True
+        reschedule_invoked = True
+        return True
+
+    def execute_inline(node: NodeSnapshot) -> bool:
+        nonlocal final_outcome, final_prose, final_raw, final_refusal_reason
+        nonlocal reschedule_result
+        with node_context(node.id):
+            if node.capability == "reschedule_work_order" and not prepare_reschedule(
+                node
+            ):
+                return False
+            graph.start(node.id, round=rounds)
+            try:
+                completed = inline_result(node)
+            except Exception as error:
+                try:
+                    graph.fail(
+                        node.id,
+                        "error",
+                        reads.error_result(error),
+                        round=rounds,
+                    )
+                except Exception:
+                    pass
+                raise
+        settle_completed(node, completed)
         if completed.succeeded:
-            assert completed.outcome is not None
-            graph.succeed(node.id, completed.outcome, round=rounds)
             if completed.reschedule is not None:
                 reschedule_result = copy.deepcopy(completed.reschedule)
             if node.capability == "answer":
@@ -368,18 +464,137 @@ def run_graph_agent(
                 final_prose = node.arguments["prose"]
                 final_raw = copy.deepcopy(completed.raw)
                 return True
-        else:
-            assert completed.failure_reason is not None
-            graph.fail(
-                node.id,
-                completed.failure_reason,
-                completed.error_detail,
-                round=rounds,
-            )
         return False
 
+    def execute_one() -> bool:
+        assert manifest is not None
+        node = eligible_ready_node(graph, manifest)
+        if node is None:
+            if graph.has_pending_or_running():
+                raise RuntimeError("pending graph nodes cannot make progress")
+            return False
+        capability = capability_for(node)
+        if capability.mcp_tool is None:
+            return execute_inline(node)
+        graph.start(node.id, round=rounds)
+        assert pool is not None
+        try:
+            future = pool.submit(worker, node, capability)
+        except Exception as error:
+            graph.fail(node.id, "error", reads.error_result(error), round=rounds)
+            raise
+        running[future] = node
+        try:
+            commit_read(future, node)
+        finally:
+            running.pop(future, None)
+        merge_buffered()
+        return False
+
+    def ready_by_family(family: str) -> list[NodeSnapshot]:
+        return [
+            node
+            for node in graph.ready_nodes()
+            if family in capability_for(node).families
+        ]
+
+    def execute_frontier(frontier: int) -> bool:
+        assert pool is not None
+        while True:
+            while len(running) < config.limits.max_workers:
+                read = next(
+                    (
+                        node
+                        for node in graph.ready_nodes()
+                        if capability_for(node).mcp_tool is not None
+                    ),
+                    None,
+                )
+                if read is None:
+                    break
+                capability = capability_for(read)
+                graph.start(read.id, round=rounds)
+                try:
+                    future = pool.submit(worker, read, capability)
+                except Exception as error:
+                    graph.fail(
+                        read.id,
+                        "error",
+                        reads.error_result(error),
+                        round=rounds,
+                    )
+                    raise
+                running[future] = read
+
+            if running:
+                done, _ = wait(tuple(running), return_when=FIRST_COMPLETED)
+                first_error: Exception | None = None
+                for future in sorted(done, key=lambda item: running[item].id):
+                    node = running.pop(future)
+                    try:
+                        commit_read(future, node)
+                    except Exception as error:
+                        if first_error is None:
+                            first_error = error
+                if first_error is not None:
+                    raise first_error
+                continue
+
+            merge_buffered()
+            if any(
+                capability_for(node).mcp_tool is not None
+                for node in graph.ready_nodes()
+            ):
+                continue
+            exclusive = next(iter(ready_by_family("exclusive")), None)
+            if exclusive is not None:
+                if execute_inline(exclusive):
+                    return True
+                continue
+            terminal = next(iter(ready_by_family("terminal")), None)
+            if terminal is not None and not any(
+                node.id != terminal.id
+                and node.state in {"pending", "running"}
+                for node in graph.nodes()
+            ):
+                return execute_inline(terminal)
+            if graph.frontier_settled(frontier):
+                return False
+            if graph.has_pending_or_running():
+                raise RuntimeError("pending graph nodes cannot make progress")
+            return False
+
+    def drain_running(original: Exception) -> None:
+        for future in tuple(running):
+            future.cancel()
+        if running:
+            wait(tuple(running))
+        for future, node in sorted(
+            tuple(running.items()), key=lambda item: item[1].id
+        ):
+            try:
+                if future.cancelled():
+                    graph.fail(
+                        node.id,
+                        "cancelled",
+                        {
+                            "error_type": type(original).__name__,
+                            "message": str(original),
+                        },
+                        round=rounds,
+                    )
+                else:
+                    commit_read(future, node)
+            except Exception:
+                pass
+            finally:
+                running.pop(future, None)
+        try:
+            merge_buffered()
+        except Exception:
+            pass
+
     try:
-        manifest = build_manifest(tools.list_tools())
         journal.append(
             "run_started",
             data={
@@ -389,6 +604,7 @@ def run_graph_agent(
                 "limits": asdict(config.limits),
             },
         )
+        manifest = build_manifest(tools.list_tools())
         pool = ThreadPoolExecutor(max_workers=config.limits.max_workers)
 
         while final_outcome is None:
@@ -492,9 +708,7 @@ def run_graph_agent(
             if config.limits.replan == "node":
                 execute_one()
             else:
-                while not graph.frontier_settled(frontier):
-                    if execute_one():
-                        break
+                execute_frontier(frontier)
 
         journal.append(
             "run_finished",
@@ -503,6 +717,7 @@ def run_graph_agent(
         )
         return result_record()
     except Exception as error:
+        drain_running(error)
         if isinstance(error, planner.PlannerError):
             state = error.state
             repairs.append(str(error))
@@ -514,7 +729,7 @@ def run_graph_agent(
         raise GraphAgentError(error, result_record()) from error
     finally:
         if pool is not None:
-            pool.shutdown(wait=True)
+            pool.shutdown(wait=True, cancel_futures=True)
 
 
-__all__ = ["GraphAgentError", "run_graph_agent"]
+__all__ = ["GraphAgentError", "eligible_ready_node", "run_graph_agent"]

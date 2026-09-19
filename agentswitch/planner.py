@@ -644,7 +644,9 @@ def _hard(message: str) -> PatchReview:
 
 
 def _duplicate_cover(
-    spec: NodeSpec, nodes: tuple[NodeSnapshot, ...], limits: LimitsConfig
+    spec: NodeSpec,
+    nodes: tuple[NodeSnapshot, ...],
+    limits: LimitsConfig,
 ) -> DiscardedAddition | None:
     for existing in nodes:
         if (
@@ -661,6 +663,25 @@ def _duplicate_cover(
                 covering_node_id=existing.id,
                 covering_state=existing.state,
                 covering_outcome=_truncated_json(existing.outcome, limits.projection_chars),
+            )
+
+    return None
+
+
+def _same_patch_duplicate_cover(
+    spec: NodeSpec, same_patch: list[NodeSpec]
+) -> DiscardedAddition | None:
+    for earlier in same_patch:
+        if (
+            earlier.capability == spec.capability
+            and earlier.arguments == spec.arguments
+        ):
+            return DiscardedAddition(
+                node_id=spec.id,
+                reason=f"duplicates same-patch node {earlier.id!r}",
+                covering_node_id=earlier.id,
+                covering_state="pending",
+                covering_outcome=None,
             )
     return None
 
@@ -743,6 +764,12 @@ def validate_patch(
                     ),
                 )
             )
+            continue
+
+        duplicate = _same_patch_duplicate_cover(validated, kept)
+        if duplicate is not None:
+            discarded.append(duplicate)
+            duplicate_count += 1
             continue
 
         if spec.capability == "reschedule_work_order":

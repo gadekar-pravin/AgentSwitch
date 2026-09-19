@@ -33,9 +33,11 @@ admission_safety_factor = 1.25
 
 [limits]
 # Graph agent limits (plan sections 5.2-5.4). Python keeps the safety rules config must not relax.
-# Threads that run read nodes; must stay 1 until phase 5 makes the MCP client and recorders safe.
-max_workers = 1
-# "frontier": one planner call after each accepted patch settles. "node": after every outcome (S17).
+# Threads that run read nodes at once (1-8). The reschedule and answer nodes always run alone.
+# Phase 5 exit runs passed at 4 (2026-09-19).
+max_workers = 4
+# "frontier": one planner call after each accepted patch settles. "node": after every outcome (S17);
+# node mode runs one node at a time whatever max_workers says.
 replan = "frontier"
 # New nodes one patch may add. The deterministic late_with_cause run makes 17 distinct reads on
 # Suryodaya (2026-09-19), so one frontier can cover the required reads.

@@ -257,9 +257,9 @@ def load_config(
             inclusive=True,
         ),
     )
-    max_workers = _integer(limits_raw["max_workers"], "limits.max_workers", minimum=1)
-    if max_workers > 1:
-        raise ConfigError("limits.max_workers above 1 needs phase 5 concurrency safety")
+    max_workers = _integer(limits_raw["max_workers"], "limits.max_workers")
+    if not 1 <= max_workers <= 8:
+        raise ConfigError("limits.max_workers must be in the allowed range 1..8")
     replan = _string(limits_raw["replan"], "limits.replan")
     if replan not in {"frontier", "node"}:
         raise ConfigError('limits.replan must be one of "frontier" or "node"')
