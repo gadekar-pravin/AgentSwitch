@@ -28,6 +28,20 @@ class Store:
     target_before_reschedule: dict[str, Any] | None = None
     target_snapshot_pinned: bool = False
 
+    def merge(self, other: Store) -> None:
+        """Append a private read fragment without changing target snapshot state."""
+        if other.target_snapshot_pinned:
+            raise ValueError("cannot merge a store with a pinned target snapshot")
+        for entity, records in other.records.items():
+            destination = self.records.setdefault(entity, {})
+            for identifier, versions in records.items():
+                destination.setdefault(identifier, []).extend(copy.deepcopy(versions))
+        self.list_calls.extend(copy.deepcopy(other.list_calls))
+        for tool, values in other.endpoints.items():
+            self.endpoints.setdefault(tool, []).extend(copy.deepcopy(values))
+        self.endpoint_calls.extend(copy.deepcopy(other.endpoint_calls))
+        self.successful_gets.extend(copy.deepcopy(other.successful_gets))
+
     def add_record(self, entity: str, record: dict[str, Any]) -> None:
         identifier = record.get("id")
         if identifier is None or not is_hashable(identifier):

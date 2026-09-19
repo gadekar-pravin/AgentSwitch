@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 from urllib.error import URLError
@@ -23,12 +24,15 @@ class OfflineMcpTransport:
         *,
         endpoints: Mapping[str, dict[str, Any]] | None = None,
         faults: Mapping[int, str] | None = None,
+        before_response: Callable[[dict[str, Any] | None], None] | None = None,
     ) -> None:
         self.catalogue = deepcopy(list(catalogue))
         self.records = {key: deepcopy(list(value)) for key, value in records.items()}
         self.endpoints = deepcopy(dict(endpoints or {}))
         self.faults = dict(faults or {})
+        self.before_response = before_response
         self.calls: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
 
     def __call__(
         self,
@@ -42,17 +46,21 @@ class OfflineMcpTransport:
             request = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError):
             request = None
-        self.calls.append(
-            {
-                "url": url,
-                "request": deepcopy(request),
-                "timeout": timeout,
-            }
-        )
-        call_number = len(self.calls)
+        with self._lock:
+            call_number = len(self.calls) + 1
+            self.calls.append(
+                {
+                    "call_number": call_number,
+                    "url": url,
+                    "request": deepcopy(request),
+                    "timeout": timeout,
+                }
+            )
         fault = self.faults.get(call_number)
         if fault == "transport":
             raise URLError(f"offline transport fault on call {call_number}")
+        if self.before_response is not None:
+            self.before_response(request if isinstance(request, dict) else None)
         if not isinstance(request, dict):
             return self._error(None, -32700, "Parse error")
 
@@ -208,10 +216,15 @@ def offline_mcp_client(
     *,
     endpoints: Mapping[str, dict[str, Any]] | None = None,
     faults: Mapping[int, str] | None = None,
+    before_response: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> tuple[McpClient, OfflineMcpTransport]:
     """Build an authenticated-looking MCP client and expose its transport."""
     transport = OfflineMcpTransport(
-        catalogue, records, endpoints=endpoints, faults=faults
+        catalogue,
+        records,
+        endpoints=endpoints,
+        faults=faults,
+        before_response=before_response,
     )
     return McpClient("https://offline.invalid", "offline-token", transport=transport), transport
 

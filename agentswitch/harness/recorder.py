@@ -3,18 +3,22 @@
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar
 from datetime import date
 from pathlib import Path
 from typing import Any
 
+from agentswitch import attribution
 from agentswitch.mcp_client import McpClient, ToolResult, WriteNotAllowed
 
 _BEARER_PATTERN = re.compile(r"(?i)Bearer\s+\S+")
 _JSON_SECRET_PATTERN = re.compile(
     r'(?i)("[^"\\]*(?:token|password)[^"\\]*"\s*:\s*)"(?:\\.|[^"\\])*"'
 )
+_PHASE_OVERRIDE: ContextVar[str | None] = ContextVar("recorder_phase_override", default=None)
 
 
 def _secret_forms(secret: str) -> tuple[str, ...]:
@@ -36,34 +40,53 @@ class ReadOnlyTools:
         self.calls: list[dict[str, Any]] = []
         self.observations: dict[tuple[str, Any], list[dict[str, Any]]] = {}
         self._sequence = 0
+        self._lock = threading.Lock()
+
+    def _effective_phase(self) -> str:
+        override = _PHASE_OVERRIDE.get()
+        return self.phase if override is None else override
 
     def _entry(self, kind: str, tool: str, arguments: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        self._sequence += 1
-        entry = {
-            "phase": self.phase,
-            "sequence": self._sequence,
-            "kind": kind,
-            "tool": tool,
-            "arguments": dict(arguments),
-        }
-        self.calls.append(entry)
-        return entry, time.perf_counter_ns()
+        with self._lock:
+            self._sequence += 1
+            started = time.monotonic_ns()
+            entry = {
+                "phase": self._effective_phase(),
+                "sequence": self._sequence,
+                "start_sequence": self._sequence,
+                "node": attribution.current_node(),
+                "started_ns": started,
+                "kind": kind,
+                "tool": tool,
+                "arguments": dict(arguments),
+            }
+            self.calls.append(entry)
+            return entry, started
 
-    @staticmethod
-    def _finish(entry: dict[str, Any], started: int, outcome: str) -> None:
-        entry["outcome"] = outcome
-        entry["elapsed_ms"] = round((time.perf_counter_ns() - started) / 1_000_000, 3)
+    def _finish(
+        self,
+        entry: dict[str, Any],
+        started: int,
+        outcome: str,
+        **fields: Any,
+    ) -> None:
+        with self._lock:
+            finished = time.monotonic_ns()
+            entry.update(fields)
+            entry["outcome"] = outcome
+            entry["elapsed_ms"] = round((finished - started) / 1_000_000, 3)
+            entry["finished_ns"] = finished
+            self._sequence += 1
+            entry["end_sequence"] = self._sequence
 
     def list_tools(self) -> list[dict[str, Any]]:
         entry, started = self._entry("list_tools", "tools/list", {})
         try:
             tools = self.client.list_tools()
         except Exception as error:
-            self._finish(entry, started, type(error).__name__)
-            entry["error"] = str(error)
+            self._finish(entry, started, type(error).__name__, error=str(error))
             raise
-        self._finish(entry, started, "ok")
-        entry["structuredContent"] = {"tools": tools}
+        self._finish(entry, started, "ok", structuredContent={"tools": tools})
         return tools
 
     def get_tool(self, name: str) -> dict[str, Any]:
@@ -71,11 +94,9 @@ class ReadOnlyTools:
         try:
             tool = self.client.get_tool(name)
         except Exception as error:
-            self._finish(entry, started, type(error).__name__)
-            entry["error"] = str(error)
+            self._finish(entry, started, type(error).__name__, error=str(error))
             raise
-        self._finish(entry, started, "ok")
-        entry["structuredContent"] = tool
+        self._finish(entry, started, "ok", structuredContent=tool)
         return tool
 
     def call_tool(
@@ -88,36 +109,30 @@ class ReadOnlyTools:
         call_arguments = {} if arguments is None else dict(arguments)
         entry, started = self._entry("call_tool", name, call_arguments)
         if allow_write:
-            entry["write"] = True
             error = WriteNotAllowed("The read-only harness adapter refuses write-enabled calls")
-            self._finish(entry, started, "refused_write")
-            entry["error"] = str(error)
+            self._finish(entry, started, "refused_write", write=True, error=str(error))
             raise error
         get_tool = getattr(self.client, "get_tool", None)
         if callable(get_tool):
             try:
                 tool = get_tool(name)
             except Exception as error:
-                self._finish(entry, started, type(error).__name__)
-                entry["error"] = str(error)
+                self._finish(entry, started, type(error).__name__, error=str(error))
                 raise
             annotations = tool.get("annotations") if isinstance(tool, dict) else None
             if not isinstance(annotations, dict) or annotations.get("readOnlyHint") is not True:
-                entry["write"] = True
+                with self._lock:
+                    entry["write"] = True
         try:
             result = self.client.call_tool(name, call_arguments)
         except WriteNotAllowed as error:
-            entry["write"] = True
-            self._finish(entry, started, "refused_write")
-            entry["error"] = str(error)
+            self._finish(entry, started, "refused_write", write=True, error=str(error))
             raise
         except Exception as error:
-            self._finish(entry, started, type(error).__name__)
-            entry["error"] = str(error)
+            self._finish(entry, started, type(error).__name__, error=str(error))
             raise
-        self._finish(entry, started, "ok")
-        entry["structuredContent"] = result.structured
-        if self.phase == "subject":
+        self._finish(entry, started, "ok", structuredContent=result.structured)
+        if entry["phase"] == "subject":
             self._observe(name, result.structured)
         return result
 
@@ -147,7 +162,8 @@ class ReadOnlyTools:
     def _add_observation(self, entity: str, identifier: Any, record: dict[str, Any]) -> None:
         if identifier is None:
             return
-        self.observations.setdefault((entity, identifier), []).append(record)
+        with self._lock:
+            self.observations.setdefault((entity, identifier), []).append(record)
 
 
 class ScopedWriteTools(ReadOnlyTools):
@@ -187,12 +203,11 @@ class ScopedWriteTools(ReadOnlyTools):
         refusal_kind: str | None = None,
     ) -> None:
         entry, started = self._entry("call_tool", name, arguments)
-        entry["write"] = True
-        if refusal_kind is not None:
-            entry["refusal_kind"] = refusal_kind
         error = WriteNotAllowed(message)
-        self._finish(entry, started, "refused_write")
-        entry["error"] = str(error)
+        fields: dict[str, Any] = {"write": True, "error": str(error)}
+        if refusal_kind is not None:
+            fields["refusal_kind"] = refusal_kind
+        self._finish(entry, started, "refused_write", **fields)
         raise error
 
     def call_tool(
@@ -220,10 +235,12 @@ class ScopedWriteTools(ReadOnlyTools):
         if not valid_scope:
             self._refuse(name, call_arguments, "Write is outside the scoped draft date update")
 
-        original_phase = self.phase
+        original_phase = self._effective_phase()
         subject_dates: dict[str, Any] | None = None
         if original_phase == "subject":
-            for call in reversed(self.calls):
+            with self._lock:
+                calls_snapshot = list(self.calls)
+            for call in reversed(calls_snapshot):
                 observed = call.get("structuredContent")
                 if (
                     call.get("phase") == "subject"
@@ -244,14 +261,16 @@ class ScopedWriteTools(ReadOnlyTools):
                     "Subject must successfully read the target before updating it",
                 )
 
-        self.phase = "write_guard" if original_phase == "subject" else original_phase
+        phase_token = _PHASE_OVERRIDE.set(
+            "write_guard" if original_phase == "subject" else original_phase
+        )
         try:
             try:
                 guard = super().call_tool("WorkOrder.get", {"id": self.target_id}).structured
             except Exception:
                 guard = None
         finally:
-            self.phase = original_phase
+            _PHASE_OVERRIDE.reset(phase_token)
         self.last_guard_dates = (
             {
                 "planned_start_date": guard.get("planned_start_date"),
@@ -285,19 +304,17 @@ class ScopedWriteTools(ReadOnlyTools):
             )
 
         entry, started = self._entry("call_tool", name, call_arguments)
-        entry["write"] = True
+        with self._lock:
+            entry["write"] = True
         try:
             result = self.client.call_tool(name, call_arguments, allow_write=True)
         except WriteNotAllowed as error:
-            self._finish(entry, started, "refused_write")
-            entry["error"] = str(error)
+            self._finish(entry, started, "refused_write", write=True, error=str(error))
             raise
         except Exception as error:
-            self._finish(entry, started, type(error).__name__)
-            entry["error"] = str(error)
+            self._finish(entry, started, type(error).__name__, write=True, error=str(error))
             raise
-        self._finish(entry, started, "ok")
-        entry["structuredContent"] = result.structured
+        self._finish(entry, started, "ok", write=True, structuredContent=result.structured)
         return result
 
 

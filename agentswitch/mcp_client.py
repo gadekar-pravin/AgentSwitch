@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from http.client import HTTPException
@@ -311,6 +312,7 @@ class McpClient:
         self._transport = transport or _default_transport
         self._get_transport = get_transport
         self._next_request_id = 1
+        self._request_id_lock = threading.Lock()
         self._initialize_result: dict[str, Any] | None = None
         self._tools: list[dict[str, Any]] | None = None
         self._tools_by_name: dict[str, dict[str, Any]] | None = None
@@ -389,6 +391,7 @@ class McpClient:
         allow_write: bool = False,
     ) -> ToolResult:
         """Validate and call a tool, requiring opt-in for possible writes."""
+        # initialize() and list_tools() must complete before concurrent call_tool use.
         tool = self.get_tool(name)
         call_arguments = {} if arguments is None else arguments
         self._validate_arguments(tool, call_arguments)
@@ -468,8 +471,9 @@ class McpClient:
         )
 
     def _request(self, method: str, params: dict[str, Any], tool_name: str | None = None) -> Any:
-        request_id = self._next_request_id
-        self._next_request_id += 1
+        with self._request_id_lock:
+            request_id = self._next_request_id
+            self._next_request_id += 1
         payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
         try:
             status, response_body = self._post(payload)

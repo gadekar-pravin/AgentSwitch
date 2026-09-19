@@ -317,7 +317,8 @@ def test_empty_model_override_is_invalid(tmp_path, monkeypatch):
         ('max_workers = 1\n', 'max_workers = 1\nextra = 1\n', "limits.extra"),
         ('page_size = 100\n', 'page_size = true\n', "limits.page_size"),
         ('replan = "frontier"\n', 'replan = "later"\n', "limits.replan"),
-        ('max_workers = 1\n', 'max_workers = 2\n', "phase 5 concurrency safety"),
+        ('max_workers = 1\n', 'max_workers = 0\n', r"limits.max_workers.*1\.\.8"),
+        ('max_workers = 1\n', 'max_workers = 9\n', r"limits.max_workers.*1\.\.8"),
     ],
 )
 def test_config_rejects_invalid_limits(tmp_path, monkeypatch, old, new, match):
@@ -328,6 +329,20 @@ def test_config_rejects_invalid_limits(tmp_path, monkeypatch, old, new, match):
 
     with pytest.raises(ConfigError, match=match):
         load_config(path, env_file=tmp_path / "missing.env")
+
+
+def test_config_accepts_four_workers(tmp_path, monkeypatch):
+    """Spec: AI (Codex). Four concurrent workers are within the supported range."""
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    path = tmp_path / "config.toml"
+    path.write_text(
+        _toml().replace("max_workers = 1", "max_workers = 4"),
+        encoding="utf-8",
+    )
+
+    assert load_config(
+        path, env_file=tmp_path / "missing.env"
+    ).limits.max_workers == 4
 
 
 def test_payload_fixed_settings_cannot_be_overridden(tmp_path, monkeypatch):

@@ -454,6 +454,31 @@ def test_duplicate_read_is_discarded_and_covering_node_is_reported():
     assert "record" in decision.discarded[0].covering_outcome
 
 
+def test_later_same_patch_duplicate_is_discarded_with_pending_cover():
+    """Spec: AI (Codex). The first identical read in one patch covers later copies."""
+    reply = _response(
+        _patch(
+            [
+                _addition("first", "WorkOrder.get", {"id": TARGET}),
+                _addition("later", "WorkOrder.get", {"id": TARGET}),
+            ]
+        )
+    )
+
+    decision, _transport = _planner_call(reply)
+
+    assert decision.accepted is True
+    assert [node.id for node in decision.patch.add] == ["first"]
+    assert len(decision.discarded) == 1
+    discarded = decision.discarded[0]
+    assert discarded.node_id == "later"
+    assert discarded.covering_node_id == "first"
+    assert discarded.covering_state == "pending"
+    assert discarded.covering_outcome is None
+    assert "duplicates same-patch node 'first'" in discarded.reason
+    assert decision.state == PlannerState.from_limits(_limits())
+
+
 def test_duplicates_only_with_no_soft_repairs_fails_visibly():
     """Spec: AI (Codex) A duplicates-only patch cannot spin after soft repairs are exhausted."""
     graph, store = _succeeded_target()
@@ -687,6 +712,39 @@ def test_reschedule_scope_once_and_model_read_rules(
 
     assert decision.repair_kind == "hard"
     assert expected in decision.message
+
+
+def test_identical_same_patch_reschedules_keep_first_without_hard_repair():
+    """Spec: AI (Codex). Identical reschedules deduplicate before once-only checks."""
+    graph, store = _succeeded_target()
+    reply = _response(
+        _patch(
+            [
+                _addition(
+                    "first",
+                    "reschedule_work_order",
+                    {"work_order_id": TARGET},
+                ),
+                _addition(
+                    "duplicate",
+                    "reschedule_work_order",
+                    {"work_order_id": TARGET},
+                ),
+            ]
+        )
+    )
+
+    decision, _transport = _planner_call(reply, graph=graph, store=store)
+
+    assert decision.accepted is True
+    assert [node.id for node in decision.patch.add] == ["first"]
+    assert decision.repair_kind is None
+    assert len(decision.discarded) == 1
+    discarded = decision.discarded[0]
+    assert discarded.node_id == "duplicate"
+    assert discarded.covering_node_id == "first"
+    assert discarded.covering_state == "pending"
+    assert discarded.covering_outcome is None
 
 
 def test_answered_requires_model_target_read_and_guard_read_does_not_count():

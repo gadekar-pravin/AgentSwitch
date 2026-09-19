@@ -141,6 +141,11 @@ the same day (the old loop has not been run on Keystone).
   within the round (it had failed one run), and `answer` no longer takes dependencies (naming the
   failed target read had cost refusals up to 4 hard repairs).
 
+Phase 5 exit runs (2026-09-19, `max_workers = 4`): 3 runs of the six read-only tasks per tenant, 36/36
+pass, and `deterministic` 12/12 the same day. Reads overlapped in 30 of the 36 runs, up to four at
+once; `refuse_outside_seat` makes a single read. The 36 runs cost $0.24. Median task time fell only
+from 79 s to 75 s against one worker, because the model, not MCP, takes most of the time.
+
 ## Harness
 
 ```bash
@@ -164,6 +169,15 @@ uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_dr
   own graph code: `journal_consistent` (replaying the journal gives the recorded graph),
   `capabilities_registered`, `limits_respected`, `terminal_last`, `write_after_target_read` and
   `single_subject_write`. They can fail a task but never turn a `not_applicable` task into a pass.
+- Graph runs read up to `limits.max_workers` records at once (config default 4). Each MCP call in
+  the record carries the graph node that made it and its start and end order. To check a set of
+  saved graph records for correct attribution and overlapping reads (read-only; prints no record
+  contents):
+
+  ```bash
+  uv run python -m agentswitch.harness.concurrency_check runs/
+  ```
+
 - `--subject graph` has no write authority until phase 6 of the plan: with `--allow-draft-writes`
   the harness stops with a configuration error before logging in.
 - A seventh task, `reschedule_own_draft`, checks the one write the agent may make: new planned
