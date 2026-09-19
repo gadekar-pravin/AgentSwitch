@@ -249,6 +249,20 @@ def _succeeded_target(*, model_read: bool = True) -> tuple[LiveGraph, Store]:
     return graph, store
 
 
+def _failed_target(detail: dict[str, Any]) -> LiveGraph:
+    graph = LiveGraph()
+    graph.apply_patch(
+        GraphPatch(
+            add=(NodeSpec("target", "WorkOrder.get", {"id": TARGET}),),
+            finish=False,
+            reason="target",
+        )
+    )
+    graph.start("target")
+    graph.fail("target", "error", detail)
+    return graph
+
+
 @pytest.mark.parametrize(
     ("addition", "expected"),
     [
@@ -744,6 +758,226 @@ def test_prompt_is_deterministic_bounded_and_uses_canonical_answer_name():
     assert "finish" not in names
     assert payload["repair_messages"] == ["try exact arguments"]
     assert "reschedule_work_order not yet called" in payload["evidence_checklist"]
+
+
+def test_prompt_projects_failed_target_not_found_detail():
+    """Spec: AI (Codex) A failed target read exposes its not-found type and message."""
+    graph = _failed_target(
+        {
+            "ok": False,
+            "error": {
+                "type": "not_found",
+                "message": "WorkOrder.get id 'WO-1' not found",
+            },
+        }
+    )
+    limits = _limits()
+
+    messages = build_messages(
+        request="Investigate.",
+        target_id=TARGET,
+        today=TODAY,
+        manifest=_manifest(),
+        graph=graph,
+        store=Store(),
+        limits=limits,
+        state=PlannerState.from_limits(limits),
+        reschedule_requested=False,
+        reschedule_attempted=False,
+    )
+    node = json.loads(messages[1]["content"])["nodes"][0]
+
+    assert "outcome_projection" not in node
+    assert '"type":"not_found"' in node["error_projection"]
+    assert "WorkOrder.get id 'WO-1' not found" in node["error_projection"]
+
+
+def test_prompt_projects_transport_outcome_uncertainty():
+    """Spec: AI (Codex) A failed transport read exposes its type and outcome uncertainty."""
+    graph = _failed_target(
+        {
+            "ok": False,
+            "error": {
+                "type": "transport",
+                "message": "offline transport fault",
+                "outcome_unknown": True,
+            },
+        }
+    )
+    limits = _limits()
+
+    messages = build_messages(
+        request="Investigate.",
+        target_id=TARGET,
+        today=TODAY,
+        manifest=_manifest(),
+        graph=graph,
+        store=Store(),
+        limits=limits,
+        state=PlannerState.from_limits(limits),
+        reschedule_requested=False,
+        reschedule_attempted=False,
+    )
+    projection = json.loads(messages[1]["content"])["nodes"][0][
+        "error_projection"
+    ]
+
+    assert '"type":"transport"' in projection
+    assert '"outcome_unknown":true' in projection
+
+
+@pytest.mark.parametrize("error_type", ["transport", "not_found"])
+def test_long_failure_message_preserves_distinguishing_error_type(error_type):
+    """Spec: AI (Codex) Long failure messages cannot hide distinguishing metadata."""
+    graph = _failed_target(
+        {
+            "ok": False,
+            "error": {
+                "message": "x" * 1000,
+                "type": error_type,
+                "outcome_unknown": error_type == "transport",
+            },
+        }
+    )
+    limits = _limits(projection_chars=200, projection_total_chars=200)
+
+    messages = build_messages(
+        request="Investigate.",
+        target_id=TARGET,
+        today=TODAY,
+        manifest=_manifest(),
+        graph=graph,
+        store=Store(),
+        limits=limits,
+        state=PlannerState.from_limits(limits),
+        reschedule_requested=False,
+        reschedule_attempted=False,
+    )
+    projection = json.loads(messages[1]["content"])["nodes"][0][
+        "error_projection"
+    ]
+
+    assert f'"type":"{error_type}"' in projection
+    other_type = "not_found" if error_type == "transport" else "transport"
+    assert f'"type":"{other_type}"' not in projection
+    if error_type == "transport":
+        assert '"outcome_unknown":true' in projection
+    assert len(projection) <= limits.projection_chars
+
+
+def test_large_error_projections_obey_per_node_and_total_caps():
+    """Spec: AI (Codex) Large failed-read details share the bounded projection budget."""
+    graph = LiveGraph()
+    error_types = ("transport", "not_found", "permission_denied")
+    for node_id, error_type in zip(("a", "b", "c"), error_types, strict=True):
+        graph.apply_patch(
+            GraphPatch(
+                add=(NodeSpec(node_id, "WorkOrder.get", {"id": node_id}),),
+                finish=False,
+                reason=node_id,
+            )
+        )
+        graph.start(node_id)
+        graph.fail(
+            node_id,
+            "error",
+            {
+                "ok": False,
+                "error": {"type": error_type, "message": node_id * 300},
+            },
+        )
+    limits = _limits(projection_chars=120, projection_total_chars=200)
+
+    messages = build_messages(
+        request="Investigate.",
+        target_id=TARGET,
+        today=TODAY,
+        manifest=_manifest(),
+        graph=graph,
+        store=Store(),
+        limits=limits,
+        state=PlannerState.from_limits(limits),
+        reschedule_requested=False,
+        reschedule_attempted=False,
+    )
+    projections = [
+        node["error_projection"]
+        for node in json.loads(messages[1]["content"])["nodes"]
+    ]
+
+    assert all(len(projection) <= limits.projection_chars for projection in projections)
+    assert sum(len(projection) for projection in projections) <= limits.projection_total_chars
+    assert all(
+        f'"type":"{error_type}"' in projection
+        for projection, error_type in zip(projections, error_types, strict=True)
+    )
+
+
+def test_failed_projection_summaries_keep_block_and_incomplete_scan_metadata():
+    """Spec: AI (Codex) Failure summaries retain block and incomplete-scan metadata."""
+    graph = LiveGraph()
+    graph.apply_patch(
+        GraphPatch(
+            add=(
+                NodeSpec("parent", "WorkOrder.get", {"id": "missing"}),
+                NodeSpec("scan", "MaterialRequest.list", {"work_order_id": TARGET}),
+            ),
+            finish=False,
+            reason="failures",
+        )
+    )
+    graph.apply_patch(
+        GraphPatch(
+            add=(
+                NodeSpec(
+                    "blocked",
+                    "MaterialRequest.list",
+                    {"work_order_id": TARGET},
+                    depends_on=("parent",),
+                ),
+            ),
+            finish=False,
+            reason="dependent",
+        )
+    )
+    graph.start("parent")
+    graph.fail(
+        "parent",
+        "error",
+        {"error": {"type": "not_found", "message": "x" * 300}},
+    )
+    graph.start("scan")
+    graph.fail(
+        "scan",
+        "incomplete_scan",
+        {"data": [{"id": "MR-1", "text": "x" * 300}], "total": 4, "complete": False},
+    )
+    limits = _limits(projection_chars=120, projection_total_chars=240)
+
+    messages = build_messages(
+        request="Investigate.",
+        target_id=TARGET,
+        today=TODAY,
+        manifest=_manifest(),
+        graph=graph,
+        store=Store(),
+        limits=limits,
+        state=PlannerState.from_limits(limits),
+        reschedule_requested=False,
+        reschedule_attempted=False,
+    )
+    nodes = {
+        node["id"]: node["error_projection"]
+        for node in json.loads(messages[1]["content"])["nodes"]
+    }
+
+    assert '"blocked_by":"parent"' in nodes["blocked"]
+    assert '"failure_reason":"incomplete_scan"' in nodes["scan"]
+    assert '"total":4' in nodes["scan"]
+    assert '"rows":1' in nodes["scan"]
+    assert '"complete":false' in nodes["scan"]
+    assert all(len(projection) <= limits.projection_chars for projection in nodes.values())
+    assert sum(len(projection) for projection in nodes.values()) <= limits.projection_total_chars
 
 
 def test_three_projection_outcomes_fit_the_total_cap():
