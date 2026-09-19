@@ -38,8 +38,8 @@ Team 04 capstone: an agent for seat **Production** (app `manufacturing`) on the 
 platform, driven over MCP, plus a harness that scores it. Target request: "This work order is
 late. Find out why, tell me what it blocks downstream, and reschedule what you can."
 
-Current stage: the MCP client, read-only investigation, guarded reschedule, LLM agent loop and
-harness exist; [README.md](README.md) lists each with its live-check status. The only tests are
+Current stage: the MCP client, read-only investigation, guarded reschedule, the graph agent (the
+LLM agent), the old loop (frozen baseline) and the harness exist; [README.md](README.md) lists each with its live-check status. The only tests are
 AI-originated (`Spec: AI`). The LLM agent calls OpenRouter (model in `config/agentswitch.toml`,
 currently `z-ai/glm-5.3-flash`; `OPENROUTER_MODEL` overrides it); do not change or add a provider
 without asking. The instructor says the platform's own LLM will be integrated with our pipeline
@@ -48,9 +48,11 @@ once the harness is ready (Release 1 note, 2026-09-17).
 Next: [docs/harness-architecture-plan.md](docs/harness-architecture-plan.md) ports the agent and
 harness to the S17Code architecture in phases. The team agreed it on 2026-09-19; phases 1, 2,
 2b, 3, 4, 5 and 6 are done (`--subject graph` runs the new graph agent, with up to four reads at
-once, and makes the one draft write with `--allow-draft-writes`). Phase 7's code is done: every
-task writes a spans file, and `--judge` adds an advisory rubric judge file; its live check is
-pending and runs with phase 8's live runs. Follow the plan's phase order.
+once, and makes the one draft write with `--allow-draft-writes`). Phase 7 is done: every task
+writes a spans file, and `--judge` adds an advisory rubric judge file. Phase 8 switched the agent
+CLI to the graph agent (read-only from the CLI); the old loop (`--loop`, `--subject llm`) is a
+frozen baseline: bug fixes only, no new features, deleted after submission. Follow the plan's
+phase order.
 
 ## Commands
 
