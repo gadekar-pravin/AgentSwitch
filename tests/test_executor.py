@@ -508,6 +508,55 @@ def test_incomplete_list_scan_fails_node_keeps_rows_and_stays_missing(
     assert any("MaterialRequest.list" in item for item in result["missing"])
 
 
+def test_graph_list_reads_use_configured_page_size_and_page_to_completion(
+    tmp_path, monkeypatch
+):
+    """Spec: AI (Codex) Graph list reads use the configured limit on every page."""
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, page_size=2))
+    material_rows = [
+        {"id": f"MR-{index}", "work_order_id": TARGET, "status": "pending"}
+        for index in range(5)
+    ]
+    first = _patch(
+        [
+            _addition("a_target", "WorkOrder.get", {"id": TARGET}),
+            _addition(
+                "b_material",
+                "MaterialRequest.list",
+                {"work_order_id": TARGET},
+            ),
+        ]
+    )
+    answer_patch = _patch([_answer()])
+    responses = [
+        _response(first),
+        _response(answer_patch),
+        _response(answer_patch),
+        _response(answer_patch),
+    ]
+    tools, transport, llm, _ = _clients(
+        config,
+        responses,
+        records=_records(MaterialRequest=material_rows),
+    )
+
+    result = _run(tools, llm, config)
+
+    node = next(item for item in result["graph"]["nodes"] if item["id"] == "b_material")
+    list_arguments = [
+        call["request"]["params"]["arguments"]
+        for call in transport.calls
+        if call["request"].get("method") == "tools/call"
+        and call["request"]["params"].get("name") == "MaterialRequest.list"
+    ]
+    assert node["state"] == "succeeded"
+    assert node["outcome"]["complete"] is True
+    assert node["outcome"]["returned"] == 5
+    assert [arguments["limit"] for arguments in list_arguments] == [2, 2, 2]
+    assert [arguments["offset"] for arguments in list_arguments] == [0, 2, 4]
+
+
 def test_terminal_waits_until_pending_read_finishes_in_node_replan(
     tmp_path, monkeypatch
 ):

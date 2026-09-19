@@ -27,6 +27,15 @@ class _Broken(ValueError):
     """Persisted evidence clearly violates a graph or journal rule."""
 
 
+class _MissingNodeKey(_Malformed):
+    """A persisted graph node omits a required export key."""
+
+    def __init__(self, node: str, key: str) -> None:
+        super().__init__(f"persisted node {node!r} is missing key {key!r}")
+        self.node = node
+        self.key = key
+
+
 def _result(name: str, verdict: str, reason: str, **evidence: Any) -> dict[str, Any]:
     return {"name": name, "verdict": verdict, "reason": reason, "evidence": evidence}
 
@@ -124,6 +133,7 @@ def _add_patch(state: dict[str, Any], event: dict[str, Any]) -> None:
             "state": "pending",
             "failure_reason": None,
             "outcome": None,
+            "error_detail": None,
         }
         state["edges"].update((parent, node_id) for parent in dependencies)
 
@@ -165,6 +175,7 @@ def _apply_transition(state: dict[str, Any], event: dict[str, Any]) -> None:
         )
     node["state"] = "failed"
     node["failure_reason"] = reason
+    node["error_detail"] = deepcopy(event["data"].get("detail"))
 
 
 def _replay(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -183,9 +194,24 @@ def _persisted_graph(record: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
         raise _Malformed("persisted graph must contain node and edge lists")
     nodes: dict[str, dict[str, Any]] = {}
-    for raw in raw_nodes:
+    required_node_keys = (
+        "id",
+        "capability",
+        "arguments",
+        "frontier",
+        "state",
+        "failure_reason",
+        "outcome",
+        "error_detail",
+    )
+    for index, raw in enumerate(raw_nodes):
         if not isinstance(raw, dict):
             raise _Malformed("persisted graph node must be an object")
+        for key in required_node_keys:
+            if key not in raw:
+                node = raw.get("id")
+                label = node if isinstance(node, str) and node else f"index {index}"
+                raise _MissingNodeKey(label, key)
         node_id = raw.get("id")
         if not isinstance(node_id, str) or not node_id:
             raise _Malformed("persisted graph node id must be a non-empty string")
@@ -195,6 +221,9 @@ def _persisted_graph(record: dict[str, Any]) -> dict[str, Any]:
             raise _Malformed(f"persisted node {node_id!r} has no capability")
         if not isinstance(raw.get("arguments"), dict):
             raise _Malformed(f"persisted node {node_id!r} has invalid arguments")
+        frontier = raw.get("frontier")
+        if not isinstance(frontier, int) or isinstance(frontier, bool) or frontier < 1:
+            raise _Malformed(f"persisted node {node_id!r} has invalid frontier")
         if raw.get("state") not in {"pending", "running", "succeeded", "failed"}:
             raise _Malformed(f"persisted node {node_id!r} has invalid state")
         failure_reason = raw.get("failure_reason")
@@ -209,9 +238,11 @@ def _persisted_graph(record: dict[str, Any]) -> dict[str, Any]:
                 "id",
                 "capability",
                 "arguments",
+                "frontier",
                 "state",
                 "failure_reason",
                 "outcome",
+                "error_detail",
             )
         }
     edges: set[tuple[str, str]] = set()
@@ -240,6 +271,14 @@ def journal_consistent(record: dict[str, Any]) -> dict[str, Any]:
         persisted = _persisted_graph(record)
     except _Broken as error:
         return _result(name, "fail", str(error))
+    except _MissingNodeKey as error:
+        return _result(
+            name,
+            "fail",
+            str(error),
+            node=error.node,
+            key=error.key,
+        )
     except _Malformed as error:
         return _result(name, "inconclusive", f"malformed journal or graph: {error}")
     replay_nodes = {
@@ -249,9 +288,11 @@ def journal_consistent(record: dict[str, Any]) -> dict[str, Any]:
                 "id",
                 "capability",
                 "arguments",
+                "frontier",
                 "state",
                 "failure_reason",
                 "outcome",
+                "error_detail",
             )
         }
         for node_id, node in replayed["nodes"].items()

@@ -13,6 +13,7 @@ import pytest
 from agentswitch.config import Config, load_config
 from agentswitch.economics import MeteredClient
 from agentswitch.executor import GraphAgentError, run_graph_agent
+from agentswitch.graph import GraphPatch, LiveGraph, NodeSpec
 from agentswitch.harness import runner, subjects
 from agentswitch.harness.audits import (
     capabilities_registered,
@@ -308,11 +309,101 @@ def test_journal_consistent_detects_persisted_graph_tampering(
                 "id": "extra",
                 "capability": "WorkOrder.get",
                 "arguments": {"id": "extra"},
+                "frontier": 1,
                 "state": "pending",
                 "failure_reason": None,
                 "outcome": None,
+                "error_detail": None,
             }
         )
+
+    assert journal_consistent(changed)["verdict"] == "fail"
+
+
+def test_journal_consistent_detects_frontier_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec: AI (Codex) Journal replay detects a changed persisted frontier."""
+    record = _real_agent_record(tmp_path, monkeypatch)
+    record["subject_output"]["agent"]["graph"]["nodes"][0]["frontier"] += 1
+
+    assert journal_consistent(record)["verdict"] == "fail"
+
+
+@pytest.mark.parametrize("key", ["error_detail", "failure_reason", "outcome"])
+def test_journal_consistent_rejects_missing_nullable_node_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    """Spec: AI (Codex) Persisted nodes must include every nullable export field."""
+    record = _real_agent_record(tmp_path, monkeypatch)
+
+    assert journal_consistent(record)["verdict"] == "pass"
+    changed = copy.deepcopy(record)
+    node = changed["subject_output"]["agent"]["graph"]["nodes"][0]
+    del node[key]
+
+    result = journal_consistent(changed)
+    assert result["verdict"] == "fail"
+    assert result["evidence"] == {"node": node["id"], "key": key}
+
+
+def _failed_and_blocked_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    record = _real_agent_record(tmp_path, monkeypatch)
+    graph = LiveGraph()
+    graph.apply_patch(
+        GraphPatch(
+            add=(NodeSpec("failed", "WorkOrder.get", {"id": TARGET}),),
+            finish=False,
+            reason="add failing read",
+        )
+    )
+    graph.apply_patch(
+        GraphPatch(
+            add=(
+                NodeSpec(
+                    "blocked",
+                    "answer",
+                    {
+                        "outcome": "refused",
+                        "refusal_reason": "source_unavailable",
+                        "prose": "Source unavailable.",
+                    },
+                    depends_on=("failed",),
+                ),
+            ),
+            finish=False,
+            reason="add dependent answer",
+        )
+    )
+    graph.start("failed")
+    graph.fail(
+        "failed",
+        "error",
+        {"ok": False, "error": {"type": "transport", "message": "offline"}},
+    )
+    record["subject_output"]["agent"]["journal"] = list(graph.journal.events)
+    record["subject_output"]["agent"]["graph"] = graph.export()
+    return record
+
+
+def test_journal_consistent_compares_failed_and_blocked_error_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec: AI (Codex) Failure details replay exactly, including blocked-node detail."""
+    record = _failed_and_blocked_record(tmp_path, monkeypatch)
+
+    assert journal_consistent(record)["verdict"] == "pass"
+    changed = copy.deepcopy(record)
+    failed = next(
+        node
+        for node in changed["subject_output"]["agent"]["graph"]["nodes"]
+        if node["id"] == "failed"
+    )
+    failed["error_detail"]["error"]["message"] = "tampered"
 
     assert journal_consistent(changed)["verdict"] == "fail"
 
