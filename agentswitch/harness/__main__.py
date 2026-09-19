@@ -29,9 +29,9 @@ def _parser(task_ids: tuple[str, ...]) -> argparse.ArgumentParser:
     parser.add_argument("--tenant", required=True, choices=("suryodaya", "keystone"))
     parser.add_argument(
         "--subject",
-        choices=("deterministic", "llm"),
+        choices=("deterministic", "llm", "graph"),
         default="deterministic",
-        help="subject implementation to evaluate",
+        help="subject implementation to evaluate (deterministic, llm, or graph)",
     )
     parser.add_argument(
         "--task",

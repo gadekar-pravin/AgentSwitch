@@ -30,3 +30,23 @@ max_attempts_per_round = 3
 max_attempts_per_run = 90
 # Multiplies the character-based input-token estimate before admission.
 admission_safety_factor = 1.25
+
+[limits]
+# Graph agent limits (plan sections 5.2-5.4). Python keeps the safety rules config must not relax.
+# Threads that run read nodes; must stay 1 until phase 5 makes the MCP client and recorders safe.
+max_workers = 1
+# "frontier": one planner call after each accepted patch settles. "node": after every outcome (S17).
+replan = "frontier"
+# New nodes one patch may add. The deterministic late_with_cause run makes 17 distinct reads on
+# Suryodaya (2026-09-19), so one frontier can cover the required reads.
+max_new_tasks = 24
+max_nodes = 64
+# Hard repairs fix rule-breaking patches; when they run out the run fails. Soft repairs name
+# missing evidence; when they run out the answer is accepted with the missing reads as unknowns.
+hard_repairs = 5
+soft_repairs = 2
+# Rows per MCP list page for graph read nodes.
+page_size = 1000
+# Characters of each node's outcome shown to the planner, and of all outcomes together per round.
+projection_chars = 4000
+projection_total_chars = 40000

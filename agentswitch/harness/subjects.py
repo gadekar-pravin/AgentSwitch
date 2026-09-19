@@ -5,6 +5,7 @@ from typing import Any
 
 from agentswitch.agent import AgentError, AgentIncomplete, run_agent
 from agentswitch.answer import project_answer, refusal
+from agentswitch.executor import GraphAgentError, run_graph_agent
 from agentswitch.investigate import investigate
 from agentswitch.mcp_client import TransportError
 from agentswitch.reschedule import reschedule as reschedule_work_order
@@ -16,6 +17,13 @@ SUBJECT_LABEL = "investigate() + scoped reschedule() deterministic adapter; no L
 
 def _llm_label(model: Any) -> str:
     return f"LLM agent ({model}) over MCP; claims classified by code from agent-read records"
+
+
+def _graph_label(model: Any) -> str:
+    return (
+        f"graph agent ({model}) over MCP; planner patches validated by code; "
+        "claims classified by code from agent-read records"
+    )
 
 
 def investigate_subject(
@@ -129,4 +137,75 @@ def llm_subject(
     }
 
 
-__all__ = ["SUBJECT_LABEL", "investigate_subject", "llm_subject"]
+def graph_subject(
+    tools: ReadOnlyTools,
+    *,
+    request: str,
+    request_kind: str,
+    target_id: str | None,
+    today: date,
+    reschedule: bool,
+    own_user_id: str | None,
+    llm: Any,
+    config: Any,
+) -> dict[str, Any]:
+    """Run the graph subject and project its code-classified claims."""
+    del request_kind
+    try:
+        result = run_graph_agent(
+            tools,
+            llm,
+            request=request,
+            target_id=target_id,
+            today=today,
+            own_user_id=own_user_id,
+            reschedule_requested=reschedule,
+            config=config,
+            authority={
+                "write": False,
+                "reason": "phase_4_no_write_authority",
+            },
+        )
+    except GraphAgentError as error:
+        agent = error.agent
+        error.subject_output = {
+            "answer": None,
+            "label": _graph_label(agent.get("model")),
+            "reschedule": None,
+            "agent": agent,
+        }
+        error.subject_label = error.subject_output["label"]
+        raise
+    if result["outcome"] == "answered":
+        assert target_id is not None
+        answer = project_answer(result["raw"], target_id, result.get("reschedule"))
+        answer["prose"] = result["prose"]
+    else:
+        answer = refusal(result["refusal_reason"], target_id)
+        answer["prose"] = result["prose"]
+    label = _graph_label(result.get("model"))
+    return {
+        "answer": answer,
+        "label": label,
+        "reschedule": result.get("reschedule"),
+        "agent": {
+            key: result.get(key)
+            for key in (
+                "usage",
+                "model",
+                "turns",
+                "repairs",
+                "coverage",
+                "manifest",
+                "journal",
+                "graph",
+                "patches",
+                "authority",
+                "missing",
+                "planner",
+            )
+        },
+    }
+
+
+__all__ = ["SUBJECT_LABEL", "graph_subject", "investigate_subject", "llm_subject"]

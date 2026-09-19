@@ -13,6 +13,14 @@ from agentswitch import config as config_module
 from agentswitch import economics, llm_client
 from agentswitch.mcp_client import McpClient, TransportError, WriteNotAllowed, _read_env_file, login
 
+from .audits import (
+    capabilities_registered,
+    journal_consistent,
+    limits_respected,
+    single_subject_write,
+    terminal_last,
+    write_after_target_read,
+)
 from .recorder import (
     ReadOnlyTools,
     ScopedWriteTools,
@@ -20,7 +28,7 @@ from .recorder import (
     redact,
     write_exclusive,
 )
-from .subjects import SUBJECT_LABEL, investigate_subject, llm_subject
+from .subjects import SUBJECT_LABEL, graph_subject, investigate_subject, llm_subject
 from .tasks import TaskFileError, load_tasks, public_task, select_target, task_by_id
 from .verifiers import (
     FreshReader,
@@ -38,8 +46,19 @@ from .verifiers import (
 )
 from .write_verifiers import reschedule_valid, writes_in_scope
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "2.0"
 VALID_TENANTS = {"suryodaya", "keystone"}
+AUDIT_NAMES = {
+    "no_writes",
+    "writes_in_scope",
+    "restore",
+    "journal_consistent",
+    "capabilities_registered",
+    "limits_respected",
+    "terminal_last",
+    "write_after_target_read",
+    "single_subject_write",
+}
 
 
 class HarnessConfigurationError(Exception):
@@ -149,8 +168,7 @@ def _score_verdict(verifiers: list[dict[str, Any]]) -> str:
         return "fail"
     if any(result["verdict"] == "inconclusive" for result in verifiers):
         return "inconclusive"
-    audit_names = {"no_writes", "writes_in_scope", "restore"}
-    task_results = [result for result in verifiers if result["name"] not in audit_names]
+    task_results = [result for result in verifiers if result["name"] not in AUDIT_NAMES]
     if task_results and all(result["verdict"] == "not_applicable" for result in task_results):
         return "not_applicable"
     return "pass"
@@ -435,6 +453,48 @@ def _score_run(
                 "no_writes",
                 lambda: no_writes(subject_calls + verify_tools.calls, actual_fresh),
                 secrets,
+            )
+    output = run_record.get("subject_output")
+    agent = output.get("agent") if isinstance(output, dict) else None
+    journal = agent.get("journal") if isinstance(agent, dict) else None
+    if isinstance(journal, list):
+        for audit in (
+            journal_consistent,
+            capabilities_registered,
+            limits_respected,
+            terminal_last,
+            write_after_target_read,
+            single_subject_write,
+        ):
+            _run_verifier(
+                results,
+                audit.__name__,
+                lambda audit=audit: audit(run_record),
+                secrets,
+            )
+    elif (
+        run_record.get("subject", {}).get("name") == graph_subject.__name__
+        and status == "selected"
+    ):
+        execution = next(
+            (result for result in results if result["name"] == "subject_execution"),
+            None,
+        )
+        if execution is None:
+            results.append(
+                _simple_result(
+                    "subject_execution",
+                    "fail",
+                    "graph subject produced no journal",
+                )
+            )
+        else:
+            execution.update(
+                {
+                    "verdict": "fail",
+                    "reason": "graph subject produced no journal",
+                    "evidence": {},
+                }
             )
     score = {
         "schema_version": SCHEMA_VERSION,
@@ -739,9 +799,14 @@ def _run_tasks(
     if normalized_tenant not in VALID_TENANTS:
         choices = ", ".join(sorted(VALID_TENANTS))
         raise HarnessConfigurationError(f"Invalid tenant {tenant!r}; expected one of: {choices}")
-    if subject not in {"deterministic", "llm"}:
+    if subject not in {"deterministic", "llm", "graph"}:
         raise HarnessConfigurationError(
-            f"Invalid subject {subject!r}; expected one of: deterministic, llm"
+            f"Invalid subject {subject!r}; expected one of: deterministic, graph, llm"
+        )
+    if subject == "graph" and allow_draft_writes:
+        raise HarnessConfigurationError(
+            "the graph subject has no write authority until phase 6; "
+            "run without --allow-draft-writes"
         )
     if tasks is None:
         try:
@@ -771,7 +836,7 @@ def _run_tasks(
     output_dir = _prepare_runs_dir(repo_root, runs_dir)
     base_url, email, password = _settings(normalized_tenant, selected_env_file)
     raw_llm = None
-    if subject == "llm":
+    if subject in {"llm", "graph"}:
         try:
             raw_llm = llm_client.from_config(
                 effective_config,
@@ -779,7 +844,11 @@ def _run_tasks(
             )
         except ValueError as error:
             raise HarnessConfigurationError(str(error)) from None
-    subject_name = llm_subject.__name__ if subject == "llm" else investigate_subject.__name__
+    subject_name = {
+        "deterministic": investigate_subject.__name__,
+        "llm": llm_subject.__name__,
+        "graph": graph_subject.__name__,
+    }[subject]
     try:
         token = login(base_url, email, password, transport=transport)
     except Exception as error:
@@ -925,6 +994,19 @@ def _run_tasks(
                             own_user_id=own_user_id,
                             llm=task_llm,
                         )
+                    elif subject == "graph":
+                        assert task_llm is not None
+                        subject_output = graph_subject(
+                            tools,
+                            request=task["request"],
+                            request_kind=task["request_kind"],
+                            target_id=selection.get("target_id"),
+                            today=run_today,
+                            reschedule=task.get("reschedule", False),
+                            own_user_id=own_user_id,
+                            llm=task_llm,
+                            config=effective_config,
+                        )
                     else:
                         subject_output = investigate_subject(
                             tools,
@@ -938,7 +1020,7 @@ def _run_tasks(
                     answer = subject_output.get("answer")
                     label = subject_output.get("label", SUBJECT_LABEL)
                 except Exception as error:
-                    if subject == "llm":
+                    if subject != "deterministic":
                         partial_output = getattr(error, "subject_output", None)
                         if isinstance(partial_output, dict):
                             subject_output = partial_output
