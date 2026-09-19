@@ -119,7 +119,8 @@ uv run python -m agentswitch.harness --tenant keystone --task refuse_not_found
 uv run python -m agentswitch.harness --tenant suryodaya --task reschedule_own_draft --allow-draft-writes
 ```
 
-- Six tasks: three late work orders (oldest late, late with a sales order, late with an open
+- Tasks are in [agentswitch/harness/tasks.jsonl](agentswitch/harness/tasks.jsonl), one per line; each
+  line's `selector` must be one the code knows. Six tasks: three late work orders (oldest late, late with a sales order, late with an open
   material request, subcontract order or job card), one completed order (must be answered "not
   late"), and two refusals (a work order that does not exist; a stock-ledger request outside the
   seat). Targets are picked from live data at run time, so no record ids are committed.
