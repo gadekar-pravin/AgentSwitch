@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,6 @@ import pytest
 from agentswitch.config import Config, load_config
 from agentswitch.economics import MeteredClient
 from agentswitch.executor import GraphAgentError, run_graph_agent
-from agentswitch.graph import GraphPatch, LiveGraph, NodeSpec
 from agentswitch.harness import runner, subjects
 from agentswitch.harness.audits import (
     capabilities_registered,
@@ -368,42 +368,180 @@ def test_journal_consistent_rejects_missing_nullable_node_fields(
 def _failed_and_blocked_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> dict[str, Any]:
-    record = _real_agent_record(tmp_path, monkeypatch)
-    graph = LiveGraph()
-    graph.apply_patch(
-        GraphPatch(
-            add=(NodeSpec("failed", "WorkOrder.get", {"id": TARGET}),),
-            finish=False,
-            reason="add failing read",
-        )
+    config = _config(tmp_path, monkeypatch)
+    config = replace(config, limits=replace(config.limits, replan="node"))
+    mcp_transport = OfflineMcpTransport(CATALOGUE, {"WorkOrder": [RELATED_RECORD]})
+    tools = McpClient(
+        "https://offline.invalid",
+        "offline-token",
+        transport=mcp_transport,
     )
-    graph.apply_patch(
-        GraphPatch(
-            add=(
-                NodeSpec(
-                    "blocked",
-                    "answer",
-                    {
-                        "outcome": "refused",
-                        "refusal_reason": "source_unavailable",
-                        "prose": "Source unavailable.",
-                    },
-                    depends_on=("failed",),
-                ),
+    answer = _answer_addition(
+        outcome="refused", refusal_reason="source_unavailable"
+    )
+    raw_llm, _ = offline_llm_client(
+        config,
+        [
+            _response(
+                [
+                    _addition("a_success", "WorkOrder.get", {"id": RELATED}),
+                    _addition("failed", "WorkOrder.get", {"id": TARGET}),
+                ]
             ),
-            finish=False,
-            reason="add dependent answer",
-        )
+            _response(
+                [
+                    _addition(
+                        "blocked",
+                        "WorkOrder.get",
+                        {"id": "WO-BLOCKED"},
+                        depends_on=["failed"],
+                    ),
+                ]
+            ),
+            _response([answer]),
+        ],
     )
-    graph.start("failed")
-    graph.fail(
-        "failed",
-        "error",
-        {"ok": False, "error": {"type": "transport", "message": "offline"}},
+    llm = MeteredClient(raw_llm, config, sleep=lambda _: None)
+    agent = run_graph_agent(
+        tools,
+        llm,
+        request="Investigate the late work order.",
+        target_id=TARGET,
+        today=TODAY,
+        own_user_id=USER,
+        reschedule_requested=False,
+        config=config,
+        authority={"write": False, "reason": "phase_4_no_write_authority"},
     )
-    record["subject_output"]["agent"]["journal"] = list(graph.journal.events)
-    record["subject_output"]["agent"]["graph"] = graph.export()
-    return record
+    return {
+        "config": config.effective_record(),
+        "economics": llm.ledger(),
+        "subject_output": {"agent": agent},
+    }
+
+
+def _remove_blocked_event(record: dict[str, Any]) -> None:
+    journal = record["subject_output"]["agent"]["journal"]
+    journal[:] = [
+        event
+        for event in journal
+        if not (event["type"] == "task_failed" and event.get("node") == "blocked")
+    ]
+    _renumber(journal)
+
+
+def test_journal_consistent_accepts_real_failed_read_with_blocked_dependent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec: AI (Codex) A real failed read and its blocked dependent replay consistently."""
+    record = _failed_and_blocked_record(tmp_path, monkeypatch)
+
+    assert journal_consistent(record)["verdict"] == "pass"
+
+
+def test_journal_consistent_rejects_missing_block_event_with_pending_descendant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec: AI (Codex) A missing block event fails even when the descendant persists pending."""
+    record = _failed_and_blocked_record(tmp_path, monkeypatch)
+    _remove_blocked_event(record)
+    blocked = next(
+        node
+        for node in record["subject_output"]["agent"]["graph"]["nodes"]
+        if node["id"] == "blocked"
+    )
+    blocked["state"] = "pending"
+    blocked["failure_reason"] = None
+    blocked["error_detail"] = None
+
+    result = journal_consistent(record)
+
+    assert result["verdict"] == "fail"
+    assert result["evidence"]["node"] == "blocked"
+
+
+def test_journal_consistent_rejects_missing_block_event_with_blocked_descendant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec: AI (Codex) A persisted blocked descendant cannot replace its missing block event."""
+    record = _failed_and_blocked_record(tmp_path, monkeypatch)
+    _remove_blocked_event(record)
+
+    result = journal_consistent(record)
+
+    assert result["verdict"] == "fail"
+    assert result["evidence"]["node"] == "blocked"
+
+
+def test_journal_consistent_rejects_stray_block_event_for_independent_node() -> None:
+    """Spec: AI (Codex) A block event outside the failed node's descendants fails."""
+    additions = [
+        _addition("parent", "WorkOrder.get", {"id": TARGET}),
+        _addition(
+            "child",
+            "WorkOrder.get",
+            {"id": RELATED},
+            depends_on=["parent"],
+        ),
+        _addition("other", "WorkOrder.get", {"id": "WO-OTHER"}),
+    ]
+    failure_detail = {"error": {"message": "parent failed"}}
+    journal = [
+        {
+            "seq": 1,
+            "type": "graph_patched",
+            "data": {
+                "kind": "patch",
+                "patch": {"add": additions},
+                "frontier": 1,
+            },
+        },
+        {"seq": 2, "type": "task_started", "node": "parent", "data": {}},
+        {
+            "seq": 3,
+            "type": "task_failed",
+            "node": "parent",
+            "data": {"reason": "tool_error", "detail": failure_detail},
+        },
+        {
+            "seq": 4,
+            "type": "task_failed",
+            "node": "child",
+            "data": {"reason": "blocked", "detail": {"blocked_by": "parent"}},
+        },
+        {
+            "seq": 5,
+            "type": "task_failed",
+            "node": "other",
+            "data": {"reason": "blocked", "detail": {"blocked_by": "parent"}},
+        },
+    ]
+    graph = {
+        "nodes": [
+            {
+                "id": addition["id"],
+                "capability": addition["capability"],
+                "arguments": addition["arguments"],
+                "frontier": 1,
+                "state": "failed",
+                "failure_reason": "tool_error"
+                if addition["id"] == "parent"
+                else "blocked",
+                "outcome": None,
+                "error_detail": failure_detail
+                if addition["id"] == "parent"
+                else {"blocked_by": "parent"},
+            }
+            for addition in additions
+        ],
+        "edges": [{"source": "parent", "target": "child"}],
+    }
+    record = {"subject_output": {"agent": {"journal": journal, "graph": graph}}}
+
+    result = journal_consistent(record)
+
+    assert result["verdict"] == "fail"
+    assert "other" in result["reason"]
 
 
 def test_journal_consistent_compares_failed_and_blocked_error_details(
